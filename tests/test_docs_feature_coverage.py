@@ -1,10 +1,15 @@
 """A lighter-weight, heuristic cousin of test_error_docs_freshness.py /
 test_config_reference_freshness.py: those are exact generator-diff checks, possible because
-errors.py/schema.py are each a single source of truth. CLAUDE.md, .cursor/rules, and
-.cursor/skills are hand-written narrative docs with no single generator — this can't prove
-they're *accurate*, only that a shipped feature is mentioned *somewhere* across the doc set a
-coding agent actually reads. Best-effort, not airtight: extend FEATURE_MARKERS whenever a new
-declarative `ai.yaml` feature lands, as part of that change's own doc-update step.
+errors.py/schema.py are each a single source of truth. CLAUDE.md and templates/copilot are
+hand-written narrative docs with no single generator — this can't prove they're *accurate*, only
+that a shipped feature is mentioned *somewhere* across the doc set a coding agent actually reads.
+Best-effort, not airtight: extend FEATURE_MARKERS whenever a new declarative `ai.yaml` feature
+lands, as part of that change's own doc-update step.
+
+Deliberately does not check a committed `.cursor/` bundle — that directory is the *output* of
+`inta copilot --agent cursor` (for a consumer project's own ai.yaml/tools/prompts, e.g.
+examples/social-media-manager/.agents/), not something this framework's own repo needs committed;
+regenerate it on demand with `inta copilot` rather than keeping a copy in version control here.
 """
 
 from pathlib import Path
@@ -13,8 +18,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 DOC_LOCATIONS = [
     REPO_ROOT / "CLAUDE.md",
-    REPO_ROOT / ".cursor" / "rules" / "intagrin-agent.mdc",
-    *sorted((REPO_ROOT / ".cursor" / "skills" / "intagrin-implement").rglob("*.md*")),
     *sorted((REPO_ROOT / "src" / "intagrin" / "templates" / "copilot").rglob("*.md")),
 ]
 
@@ -55,8 +58,7 @@ def _combined_doc_text() -> str:
 def test_every_feature_marker_is_mentioned_somewhere_in_the_doc_set():
     combined = _combined_doc_text()
     missing = [
-        f"{marker!r} ({hint}) is not mentioned in CLAUDE.md, .cursor/rules, "
-        ".cursor/skills/intagrin-implement, or templates/copilot"
+        f"{marker!r} ({hint}) is not mentioned in CLAUDE.md or templates/copilot"
         for marker, hint in FEATURE_MARKERS.items()
         if marker not in combined
     ]
@@ -67,6 +69,4 @@ def test_doc_locations_actually_resolved_at_least_one_file_per_directory_glob():
     """Guards the test above against silently checking nothing — an empty glob (e.g. a renamed
     directory) would make every marker check vacuously pass."""
     assert (REPO_ROOT / "CLAUDE.md").exists()
-    assert (REPO_ROOT / ".cursor" / "rules" / "intagrin-agent.mdc").exists()
-    assert any((REPO_ROOT / ".cursor" / "skills" / "intagrin-implement").rglob("*.md*"))
     assert any((REPO_ROOT / "src" / "intagrin" / "templates" / "copilot").rglob("*.md"))

@@ -127,7 +127,7 @@ Single Typer app (`app`) with one function per `inta <command>` (e.g. `new`, `de
 
 ## Framework conventions (apply to code this repo scaffolds/generates for consumers, e.g. via `inta new`, `inta copilot`, or example apps)
 
-Per `.cursor/rules/intagrin-agent.mdc`, these govern any IntaGrin *application* code (scaffolding templates in `cli.py`, the exporter, and the example apps under `examples/`):
+Per `src/intagrin/templates/copilot/architect_instructions.md` (the source `inta copilot` renders into `.cursor/rules/intagrin-agent.mdc` and equivalents for other IDEs — not committed in this repo itself, regenerate on demand with `inta copilot`), these govern any IntaGrin *application* code (scaffolding templates in `cli.py`, the exporter, and the example apps under `examples/`):
 
 - No programmatic graph routing (no LangChain/LangGraph-style code) — orchestration, routing, memory, and guardrails belong declaratively in `ai.yaml`.
 - Custom logic and external API integrations are plain Python functions in `tools/*.py` with type hints and docstrings (parsed into JSON schemas); for external REST APIs prefer `type: "openapi"` over hand-written wrappers.
