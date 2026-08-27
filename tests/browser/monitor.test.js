@@ -368,8 +368,16 @@ test('Logs search filters by session id / status / error text', async () => {
 });
 
 test('Theme toggle switches to light mode and persists across a reload', async () => {
-  const page = await browser.newPage();
+  // Isolated context + explicit media-feature emulation: the app only falls back to 'dark' when
+  // prefers-color-scheme does NOT match light (monitor.html), which otherwise depends on the
+  // runner's own ambient OS/browser default — not something this test should depend on. Without
+  // pinning it, this passed locally (non-light ambient default) but failed in CI, whose headless
+  // Chrome default apparently matches light. Same isolation reasoning as the dedicated
+  // prefers-color-scheme test below, which already emulates explicitly for exactly this reason.
+  const context = await browser.createBrowserContext();
+  const page = await context.newPage();
   try {
+    await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(
       () => document.body.innerText.toUpperCase().includes('ACTIVE SESSION'),
@@ -407,6 +415,7 @@ test('Theme toggle switches to light mode and persists across a reload', async (
     assert.equal(classAfterReload, 'light', 'expected the theme choice to survive a reload');
   } finally {
     await page.close();
+    await context.close();
   }
 });
 
