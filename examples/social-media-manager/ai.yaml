@@ -1,0 +1,61 @@
+name: "social-media-manager"
+version: "1.0"
+default_agent: "research_agent"
+
+model:
+  primary: "gemini/gemini-3.5-flash-lite"
+  fallback: "gemini/gemini-3.5-flash"
+  temperature: 0.7
+  guardrails:
+    mask_pii: true
+
+circuit_breakers:
+  max_handoffs_per_session: 10
+
+memory:
+  type: "sqlite"
+  db_path: ".ai/memory.db"
+
+telemetry:
+  - "otel"
+
+server:
+  auth:
+    type: "api_key"
+    env_var: "INTAGRIN_API_KEY"
+    # Without this, the exact same INTAGRIN_API_KEY that triggers post_to_linkedin (a real,
+    # irreversible publish-to-the-internet action) could also immediately approve it via
+    # /resume — the same credential playing both roles is not a real review boundary. This
+    # requires a distinct X-Approver-Key header/credential to approve it.
+    approver_env_var: "INTAGRIN_APPROVER_KEY"
+agents:
+  research_agent:
+    description: "Identifies and researches trending AI and IT topics from live web sources."
+    system_prompt_file: "prompts/research_agent.jinja2"
+    handoffs:
+      - "content_generator_agent"
+      - "reviewer_agent"
+    tools:
+      - name: "fetch_trending_ai_topics"
+        module: "tools.custom_tools"
+
+  content_generator_agent:
+    description: "Conducts deep web research on the chosen topic and drafts engaging LinkedIn posts."
+    system_prompt_file: "prompts/content_generator_agent.jinja2"
+    handoffs:
+      - "reviewer_agent"
+      - "research_agent"
+    tools:
+      - name: "search_topic_details"
+        module: "tools.custom_tools"
+
+  reviewer_agent:
+    description: "Reviews post quality, clarity, and tone, then publishes approved content to LinkedIn."
+    system_prompt_file: "prompts/reviewer_agent.jinja2"
+    handoffs:
+      - "content_generator_agent"
+      - "research_agent"
+    tools:
+      - name: "post_to_linkedin"
+        module: "tools.custom_tools"
+        requires_approval: true

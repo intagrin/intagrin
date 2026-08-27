@@ -1,0 +1,40 @@
+name: IntaGrin Continuous Agent Evaluation
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  agent-evaluation:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # inta verify/eval need a real ai.yaml — the repo root has none, only the example
+        # projects do. social-media-manager is the only one with both ai.yaml and
+        # tests/evals.yaml, so it's the only one inta eval can actually exercise.
+        working-directory: social-media-manager
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv and IntaGrin
+        working-directory: .
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          uv pip install --system -e .
+
+      - name: Run Formal Graph Verification
+        run: inta verify
+
+      - name: Run Deterministic Evals
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: inta eval

@@ -1,0 +1,20 @@
+evaluations:
+  - name: "research_handoff_test"
+    agent: "research_agent"
+    input: "Find the latest trending topic in Artificial Intelligence."
+    expected_tool: "fetch_trending_ai_topics"
+
+  - name: "cloud_domain_research_test"
+    agent: "research_agent"
+    input: "Discover current breakthroughs in cloud computing and kubernetes infrastructure."
+    expected_tool: "fetch_trending_ai_topics"
+
+  - name: "post_generation_web_search_test"
+    agent: "content_generator_agent"
+    input: "Research more details on Claude 3.7 Sonnet hybrid reasoning and craft a post."
+    expected_tool: "search_topic_details"
+
+  - name: "reviewer_submission_test"
+    agent: "reviewer_agent"
+    input: "Please review this LinkedIn post draft and submit it for human approval."
+    expected_tool: "submit_for_human_review"

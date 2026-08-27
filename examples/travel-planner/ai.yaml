@@ -1,0 +1,49 @@
+version: "1.0"
+name: TravelPlanner
+description:
+  A travel planning assistant that helps create itineraries and book travel
+  components. It can spawn multiple sub-planners for complex multi-city trips.
+  After researching each destination, it presents the full itinerary to the human
+  for approval before proceeding to book flights and hotels.
+model:
+  primary: gemini/gemini-3.5-flash-lite
+  guardrails:
+    # Backstop only — the traveler's email itself never enters a message in the first place (see
+    # tools/user_profile_store.py and book_flight/book_hotel's _require_authorized_profile gate).
+    # This catches any *other* PII someone happens to type into the chat.
+    mask_pii: true
+memory:
+  type: sqlite
+tools:
+  - name: create_itinerary
+    module: tools.travel_tools
+  - name: book_flight
+    module: tools.travel_tools
+    requires_approval: true
+  - name: book_hotel
+    module: tools.travel_tools
+    requires_approval: true
+agents:
+  planner:
+    description: Helps users plan trips, create itineraries, and book flights/hotels.
+    system_prompt_file: prompts/planner_prompt.jinja2
+    tools:
+      - name: create_itinerary
+      - name: book_flight
+      - name: book_hotel
+    spawns:
+      tool_pool:
+        - create_itinerary
+      result_schema: "schemas.ItineraryResult"
+      requires_approval_on_first_action: false
+      max_creations_per_session: 10
+circuit_breakers:
+  max_handoffs_per_session: 15
+  max_delegation_turns: 20
+server:
+  auth:
+    type: api_key
+    env_var: TRAVEL_PLANNER_API_KEY
+default_agent: planner
+
+

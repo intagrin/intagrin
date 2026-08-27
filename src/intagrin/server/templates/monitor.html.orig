@@ -1,0 +1,1192 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IntaGrin Monitor</title>
+
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Tailwind -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'] },
+                    colors: {
+                        background: '#0a0a0a',
+                        surface: '#171717',
+                        border: '#262626',
+                        primary: '#6366f1',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- React & React Flow -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/reactflow@11.10.1/dist/umd/index.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/reactflow@11.10.1/dist/style.css" />
+
+    <style>
+        body {
+            background-color: #0a0a0a;
+            color: #ededed;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #3f3f46;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #52525b;
+        }
+
+        /* React Flow Dark Theme Overrides */
+        .react-flow__node {
+            border-radius: 8px;
+            border: 1px solid #262626;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+        }
+
+        .react-flow__controls {
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.3);
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #262626;
+        }
+
+        .react-flow__controls button {
+            background: #171717;
+            border-bottom: 1px solid #262626;
+            fill: #a3a3a3;
+        }
+
+        .react-flow__controls button:hover {
+            background: #262626;
+        }
+
+        .react-flow__handle {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #6366f1;
+            border: 2px solid #171717;
+            cursor: crosshair;
+            transition: all 0.2s;
+        }
+
+        .react-flow__handle:hover {
+            transform: scale(1.3);
+            background: #10b981;
+        }
+
+        /* Markdown Prose Styles */
+        .prose h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            color: #f4f4f5;
+        }
+
+        .prose h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+            color: #e4e4e7;
+        }
+
+        .prose h3 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            margin-top: 1.25rem;
+            margin-bottom: 0.5rem;
+            color: #d4d4d8;
+        }
+
+        .prose p {
+            margin-bottom: 1rem;
+            color: #a1a1aa;
+            line-height: 1.6;
+        }
+
+        .prose pre {
+            background: #171717;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+            margin-bottom: 1rem;
+            border: 1px solid #262626;
+        }
+
+        .prose code {
+            color: #818cf8;
+            font-family: monospace;
+            font-size: 0.875rem;
+        }
+
+        .prose a {
+            color: #6366f1;
+            text-decoration: underline;
+        }
+
+        .prose ul {
+            list-style-type: disc;
+            padding-left: 1.5rem;
+            margin-bottom: 1rem;
+            color: #a1a1aa;
+        }
+
+        .prose li {
+            margin-bottom: 0.25rem;
+        }
+
+        .prose blockquote {
+            border-left: 4px solid #3f3f46;
+            padding-left: 1rem;
+            color: #a1a1aa;
+            font-style: italic;
+        }
+    </style>
+</head>
+
+<body class="antialiased h-screen overflow-hidden flex flex-col">
+    <div id="root" class="flex flex-col h-full"></div>
+
+    <script>window.LOGO_DATA_URI = "{{ logo_data_uri }}";</script>
+    {% raw %}
+    <script type="text/babel">
+        const { useState, useEffect, useCallback } = React;
+        const { ReactFlow, Controls, Background, applyNodeChanges, applyEdgeChanges, MarkerType, addEdge } = window.ReactFlow;
+
+        const Badge = ({ children, color = 'blue' }) => {
+            const colors = {
+                blue: 'bg-blue-500/10 text-blue-400 ring-blue-500/20',
+                green: 'bg-emerald-500/10 text-emerald-400 ring-emerald-500/20',
+                purple: 'bg-purple-500/10 text-purple-400 ring-purple-500/20',
+                amber: 'bg-amber-500/10 text-amber-400 ring-amber-500/20',
+            };
+            return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ring-1 ring-inset ${colors[color]}`}>{children}</span>;
+        };
+
+        const NavBar = ({ onSync, onSyncBlueprint, mainTab, setMainTab }) => (
+            <header className="h-16 border-b border-border bg-surface/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10 relative">
+                <div className="flex items-center gap-6">
+                    <div className="flex items-center gap-3">
+                        <img src={window.LOGO_DATA_URI} alt="IntaGrin Logo" className="h-9 max-w-[180px] object-contain" />
+                        <h1 className="text-lg font-semibold tracking-tight"><span className="text-neutral-500 font-normal ml-2">Monitor</span></h1>
+                    </div>
+
+                    <div className="flex items-center gap-1 ml-6 border-l border-border pl-6">
+                        <button onClick={() => setMainTab('dashboard')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${mainTab === 'dashboard' ? 'bg-primary/10 text-primary' : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/5'}`}>Dashboard</button>
+                        <button onClick={() => setMainTab('docs')} className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${mainTab === 'docs' ? 'bg-primary/10 text-primary' : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/5'}`}>Documentation</button>
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                    <button
+                        onClick={onSyncBlueprint}
+                        className="flex items-center gap-2 px-4 py-2 bg-primary/10 hover:bg-primary/20 text-primary text-sm font-medium rounded-lg border border-primary/20 transition-all duration-200"
+                    >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+                        </svg>
+                        Push Graph to Blueprint
+                    </button>
+                    <button
+                        onClick={onSync}
+                        className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 text-sm font-medium rounded-lg border border-white/10 transition-all duration-200"
+                    >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        Sync State
+                    </button>
+                </div>
+            </header>
+        );
+
+        const SessionCard = ({ session, onContinueChat }) => {
+            const [activeTab, setActiveTab] = useState('trace');
+
+            return (
+                <div className="bg-surface border border-border rounded-xl overflow-hidden shadow-sm">
+                    <div className="px-4 py-3 border-b border-border bg-white/[0.02] flex justify-between items-center">
+                        <div className="flex items-center gap-2">
+                            <span className="text-xs font-medium text-neutral-400">Session ID:</span>
+                            <code className="text-xs text-primary font-mono bg-primary/10 px-1.5 py-0.5 rounded">{session.session_id}</code>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            {session.state?._metrics && (
+                                <>
+                                    <div className="text-[10px] bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded border border-blue-500/20">{(session.state._metrics.total_tokens).toLocaleString()} Tokens</div>
+                                    <div className="text-[10px] bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded border border-emerald-500/20">${(session.state._metrics.total_cost).toFixed(5)}</div>
+                                </>
+                            )}
+                            {onContinueChat && (
+                                <button onClick={() => onContinueChat(session.session_id)} className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider bg-primary/20 text-primary rounded hover:bg-primary/30 transition-colors border border-primary/30 ml-2">
+                                    Chat
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="border-b border-border bg-surface flex text-sm">
+                        <button onClick={() => setActiveTab('trace')} className={`flex-1 py-2.5 text-center text-xs font-semibold tracking-wide uppercase transition-colors border-b-2 ${activeTab === 'trace' ? 'border-primary text-primary' : 'border-transparent text-neutral-500 hover:text-neutral-300'}`}>Trace Timeline</button>
+                        <button onClick={() => setActiveTab('state')} className={`flex-1 py-2.5 text-center text-xs font-semibold tracking-wide uppercase transition-colors border-b-2 ${activeTab === 'state' ? 'border-amber-400 text-amber-400' : 'border-transparent text-neutral-500 hover:text-neutral-300'}`}>Global State</button>
+                        <button onClick={() => setActiveTab('debug')} className={`flex-1 py-2.5 text-center text-xs font-semibold tracking-wide uppercase transition-colors border-b-2 ${activeTab === 'debug' ? 'border-purple-400 text-purple-400' : 'border-transparent text-neutral-500 hover:text-neutral-300'}`}>Raw Debug</button>
+                    </div>
+
+                    <div className="p-4">
+                        {activeTab === 'state' && (
+                            <div className="bg-background border border-border rounded-lg p-3 overflow-x-auto max-h-[400px]">
+                                <pre className="text-[11px] text-amber-300 font-mono">{JSON.stringify(session.state, null, 2)}</pre>
+                            </div>
+                        )}
+
+                        {activeTab === 'debug' && (
+                            <div className="bg-background border border-border rounded-lg p-3 overflow-x-auto max-h-[400px]">
+                                <pre className="text-[11px] text-purple-300 font-mono">{JSON.stringify(session.messages, null, 2)}</pre>
+                            </div>
+                        )}
+
+                        {activeTab === 'trace' && (
+                            <div className="space-y-3">
+                                {session.messages.map((msg, i) => {
+                                    if (msg.role === 'user') {
+                                        return (
+                                            <div key={i} className="flex gap-3">
+                                                <div className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 text-xs font-bold">U</div>
+                                                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3 text-sm text-neutral-200 flex-1">{msg.content}</div>
+                                            </div>
+                                        );
+                                    }
+                                    if (msg.role === 'assistant') {
+                                        return (
+                                            <div key={i} className="flex gap-3">
+                                                <div className="w-6 h-6 rounded-full bg-purple-500/20 text-purple-400 flex items-center justify-center shrink-0 text-xs font-bold">A</div>
+                                                <div className="flex-1 space-y-2">
+                                                    {msg.content && (
+                                                        <div
+                                                            className="text-sm text-neutral-300 bg-white/5 rounded-lg p-3 border border-border prose prose-invert prose-sm max-w-none"
+                                                            dangerouslySetInnerHTML={{
+                                                                __html: typeof marked !== 'undefined' ? marked.parse(msg.content) : msg.content
+                                                            }}
+                                                        />
+                                                    )}
+                                                    {msg.tool_calls && msg.tool_calls.map((tc, j) => (
+                                                        <div key={j} className="bg-surface border border-border rounded-lg p-2.5 flex flex-col gap-1.5 shadow-sm">
+                                                            <div className="flex items-center gap-2">
+                                                                <svg className="w-3.5 h-3.5 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                                                                <span className="text-xs font-medium text-neutral-300">Action: {tc.function.name}</span>
+                                                            </div>
+                                                            <code className="text-[11px] text-neutral-400 bg-background p-1.5 rounded break-all">{tc.function.arguments}</code>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    }
+                                    if (msg.role === 'tool') {
+                                        return (
+                                            <div key={i} className="flex gap-3 pl-9">
+                                                <div className="flex-1 bg-amber-500/5 border border-amber-500/20 rounded-lg p-2.5 flex flex-col gap-1 text-sm shadow-sm">
+                                                    <span className="text-[10px] uppercase font-bold text-amber-500 tracking-wider">Result from {msg.name}</span>
+                                                    <code className="text-xs text-amber-200/80 break-words">{(msg.content || '').substring(0, 200)}{msg.content?.length > 200 ? '...' : ''}</code>
+                                                </div>
+                                            </div>
+                                        );
+                                    }
+                                    return null;
+                                })}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const Playground = ({ fetchMemory, messages, setMessages, streamingAgent, setStreamingAgent, sessions, activeSessionId, setActiveSessionId }) => {
+            const [input, setInput] = useState('');
+            const [loading, setLoading] = useState(false);
+            const playgroundSession = (sessions || []).find(s => s.session_id === activeSessionId);
+
+            const sendMessage = async () => {
+                if (!input.trim() || loading) return;
+                const userMsg = input;
+                setInput('');
+                setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+                setLoading(true);
+
+                try {
+                    const response = await fetch('/api/stream', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: userMsg, session_id: activeSessionId })
+                    });
+
+                    console.log("FETCH STATUS:", response.status);
+
+                    if (!response.ok) {
+                        const err = await response.json();
+                        setMessages(prev => [...prev, { role: 'assistant', content: "Error: " + (err.detail || "Unknown error") }]);
+                        setLoading(false);
+                        return;
+                    }
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    
+                    console.log("GOT READER");
+
+                    setMessages(prev => [...prev, { role: 'assistant', content: '', agent: '' }]);
+
+                    let buffer = '';
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        console.log("READ CHUNK done:", done, "value size:", value ? value.length : 0);
+                        if (done) break;
+
+                        buffer += decoder.decode(value, { stream: true });
+                        console.log("BUFFER NOW:", buffer);
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || '';
+
+                        for (const line of lines) {
+                            console.log("PARSING LINE:", line);
+                            if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+                                try {
+                                    const data = JSON.parse(line.slice(6));
+                                    console.log("Stream Chunk:", data);
+                                    if (data.type === 'agent') {
+                                        setStreamingAgent(data.agent);
+                                        setMessages(prev => {
+                                            const newMsgs = [...prev];
+                                            const lastIdx = newMsgs.length - 1;
+                                            if (newMsgs[lastIdx].role === 'assistant') {
+                                                newMsgs[lastIdx] = { ...newMsgs[lastIdx], agent: data.agent };
+                                            }
+                                            return newMsgs;
+                                        });
+                                    } else if (data.type === 'content' || data.type === 'status') {
+                                        setMessages(prev => {
+                                            const newMsgs = [...prev];
+                                            const lastIdx = newMsgs.length - 1;
+                                            newMsgs[lastIdx] = { ...newMsgs[lastIdx], content: (newMsgs[lastIdx].content || '') + (data.content || '') };
+                                            return newMsgs;
+                                        });
+                                    }
+                                } catch (e) {
+                                    // Ignore parse errors on incomplete chunks
+                                }
+                            }
+                        }
+                    }
+                    fetchMemory();
+                } catch (e) {
+                    setMessages(prev => [...prev, { role: 'assistant', content: "Network error: " + e.message }]);
+                }
+                setLoading(false);
+                setTimeout(() => setStreamingAgent(null), 2000);
+            };
+
+            return (
+                <div className="flex flex-col h-full relative">
+                    <div className="px-4 py-2 bg-surface/90 border-b border-border flex justify-between items-center absolute top-0 left-0 w-full z-20 backdrop-blur-md">
+                        <div className="flex items-center gap-2">
+                            <span className="text-xs text-neutral-400 font-semibold tracking-wider uppercase">Active Session</span>
+                            <input
+                                type="text"
+                                value={activeSessionId}
+                                onChange={(e) => setActiveSessionId(e.target.value)}
+                                className="bg-background border border-border rounded px-2 py-1 text-xs text-primary font-mono focus:outline-none focus:border-primary shadow-inner"
+                            />
+                        </div>
+                        <button
+                            onClick={() => {
+                                const newId = 'session_' + Math.random().toString(36).substring(2, 9);
+                                setActiveSessionId(newId);
+                                setMessages([]);
+                            }}
+                            className="text-[10px] font-bold uppercase tracking-wider bg-white/5 hover:bg-white/10 text-neutral-300 px-3 py-1.5 rounded border border-white/10 transition-colors shadow-sm"
+                        >
+                            + New Session
+                        </button>
+                    </div>
+
+                    {/* Thermodynamic HUD */}
+                    {playgroundSession && playgroundSession.state?._metrics && (
+                        <div className="absolute top-16 right-4 z-10 bg-surface/90 backdrop-blur border border-border shadow-lg rounded-lg p-3 flex flex-col gap-2 min-w-[250px]">
+                            <div className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider mb-1">Thermodynamic HUD</div>
+                            <div className="flex justify-between items-center text-xs">
+                                <span className="text-neutral-300">Burn Rate:</span>
+                                <span className="font-mono text-emerald-400 font-medium">${Number(playgroundSession.state._metrics.total_cost || 0).toFixed(5)}</span>
+                            </div>
+                            <div className="flex justify-between items-center text-xs">
+                                <span className="text-neutral-300">Context Window:</span>
+                                <span className="font-mono text-blue-400 font-medium">{Number(playgroundSession.state._metrics.total_tokens || 0).toLocaleString()} / 128k</span>
+                            </div>
+                            <div className="w-full bg-background rounded-full h-1.5 mt-1 border border-neutral-800 overflow-hidden">
+                                <div className="bg-emerald-500 h-1.5 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" style={{ width: `${Math.min((Number(playgroundSession.state._metrics.total_tokens || 0) / 128000) * 100, 100)}%` }}></div>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="flex-1 overflow-y-auto p-4 space-y-4 pb-20 pt-16">
+                        {messages.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-neutral-500 text-sm italic">
+                                <div>No messages in this session yet.</div>
+                                <div className="text-xs text-neutral-600 mt-2">Type a message below to start streaming.</div>
+                            </div>
+                        ) : (
+                            <React.Fragment>
+                                {messages.map((m, i) => (
+                                    <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                        <div className={`max-w-[80%] rounded-xl p-3 ${m.role === 'user' ? 'bg-primary text-white shadow-md' : 'bg-surface border border-border text-neutral-200 shadow-sm'}`}>
+                                            {m.agent && <div className="text-[10px] uppercase font-bold text-primary mb-1 tracking-wider">{m.agent}</div>}
+                                            {m.role === 'user' ? (
+                                                <div className="text-sm">{m.content}</div>
+                                            ) : (
+                                                <div
+                                                    className="text-sm prose prose-invert prose-sm max-w-none"
+                                                    dangerouslySetInnerHTML={{
+                                                        __html: typeof marked !== 'undefined' ? marked.parse(String(m.content || '')) : m.content
+                                                    }}
+                                                />
+                                            )}
+                                        </div>
+                                    </div>
+                                ))}
+                            </React.Fragment>
+                        )}
+                        {loading && (
+                            <div className="flex justify-start">
+                                        <div className="px-2 py-1 rounded border border-neutral-700 bg-background text-neutral-400">KV-Cache Hit</div>
+                                        <span className="text-neutral-600">→</span>
+                                        <div className="px-3 py-1 rounded border border-emerald-500/50 bg-emerald-500/10 text-emerald-400 animate-pulse shadow-[0_0_15px_rgba(16,185,129,0.2)]">
+                                            {streamingAgent ? `Agent: ${streamingAgent.replace(/_/g, ' ').replace(/\b\\w/g, l => l.toUpperCase())}` : 'Processing...'}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    <div className="p-4 border-t border-border bg-surface/50">
+                        <input
+                            type="text"
+                            value={input}
+                            onChange={e => setInput(e.target.value)}
+                            onKeyDown={e => e.key === 'Enter' && sendMessage()}
+                            className="w-full bg-background border border-border rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary transition-all shadow-inner"
+                            placeholder="Type a message to test your agents..."
+                        />
+                    </div>
+                </div>
+            );
+        };
+
+        const DocsViewer = () => {
+            const [docs, setDocs] = useState([]);
+            const [selectedDoc, setSelectedDoc] = useState(null);
+
+            useEffect(() => {
+                fetch('/api/docs').then(r => r.json()).then(d => {
+                    const sortedDocs = d.sort((a, b) => a.filename.localeCompare(b.filename));
+                    setDocs(sortedDocs);
+                    if (sortedDocs.length > 0) setSelectedDoc(sortedDocs[0]);
+                }).catch(e => console.error("Docs fetch error:", e));
+            }, []);
+
+            const formatDocName = (filename) => {
+                return filename.replace(/^[0-9]+_/, '').replace('.md', '').replace(/[-_]/g, ' ');
+            };
+
+            if (docs.length === 0) {
+                return (
+                    <div className="flex flex-col items-center justify-center h-full text-neutral-500 bg-surface/10">
+                        <svg className="w-16 h-16 mb-6 text-neutral-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                        </svg>
+                        <h3 className="text-lg font-medium text-neutral-300 mb-2">No Documentation Found</h3>
+                        <p className="text-sm">Create a <code className="bg-white/10 px-2 py-1 rounded text-primary font-mono">docs/</code> directory in your project root and add markdown files.</p>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="flex h-full bg-background w-full">
+                    {/* Magical Sidebar */}
+                    <div className="w-64 border-r border-border bg-surface/40 flex flex-col backdrop-blur-md relative z-10 shrink-0">
+                        <div className="px-5 py-4 border-b border-border/50 flex items-center gap-3 bg-surface/50">
+                            <div className="w-8 h-8 rounded-lg bg-primary/20 text-primary flex items-center justify-center shadow-[0_0_15px_-3px_rgba(99,102,241,0.4)]">
+                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
+                            </div>
+                            <span className="font-bold text-sm tracking-wide text-white">Knowledge Base</span>
+                        </div>
+                        <div className="p-3 flex-1 overflow-y-auto space-y-1">
+                            {docs.map(doc => (
+                                <button key={doc.filename}
+                                    onClick={() => setSelectedDoc(doc)}
+                                    className={`w-full text-left px-3 py-2.5 text-sm rounded-lg transition-all duration-200 flex items-center gap-3 group ${selectedDoc?.filename === doc.filename ? 'bg-primary text-white shadow-md shadow-primary/20' : 'text-neutral-400 hover:bg-white/5 hover:text-neutral-200'}`}>
+                                    <svg className={`w-4 h-4 shrink-0 transition-colors ${selectedDoc?.filename === doc.filename ? 'text-white' : 'text-neutral-500 group-hover:text-neutral-300'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                                    <span className="truncate capitalize">{formatDocName(doc.filename)}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Content Area */}
+                    <div className="flex-1 flex flex-col h-full bg-[#0a0a0a] relative overflow-hidden">
+                        {/* Glassmorphism Header */}
+                        <div className="absolute top-0 left-0 w-full h-14 bg-[#0a0a0a]/80 backdrop-blur-xl border-b border-border/50 z-10 flex items-center px-8 shadow-sm">
+                            <div className="flex items-center gap-2 text-xs font-medium text-neutral-400">
+                                <span>Docs</span>
+                                <span className="text-neutral-600">/</span>
+                                <span className="text-primary capitalize">{selectedDoc ? formatDocName(selectedDoc.filename) : ''}</span>
+                            </div>
+                        </div>
+
+                        {/* Markdown Body */}
+                        <div className="flex-1 overflow-y-auto pt-24 pb-16 px-12 md:px-24">
+                            <div className="max-w-4xl mx-auto">
+                                <div
+                                    className="prose prose-invert prose-sm md:prose-base max-w-none 
+                                    prose-headings:text-neutral-100 prose-headings:font-bold prose-h1:text-3xl prose-h1:tracking-tight prose-h1:mb-8
+                                    prose-a:text-primary hover:prose-a:text-indigo-400 prose-a:transition-colors
+                                    prose-code:text-emerald-400 prose-code:bg-emerald-400/10 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:before:content-none prose-code:after:content-none
+                                    prose-pre:bg-[#121212] prose-pre:border prose-pre:border-white/10 prose-pre:shadow-xl
+                                    prose-strong:text-neutral-200 prose-blockquote:border-l-primary prose-blockquote:bg-primary/5 prose-blockquote:py-1 prose-blockquote:px-4 prose-blockquote:rounded-r-lg prose-blockquote:not-italic"
+                                    dangerouslySetInnerHTML={{ __html: marked.parse(selectedDoc?.content || "") }}
+                                ></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const Monitor = () => {
+            const [mainTab, setMainTab] = useState('dashboard');
+            const [isRightPaneOpen, setIsRightPaneOpen] = useState(true);
+            const [nodes, setNodes] = useState([]);
+            const [edges, setEdges] = useState([]);
+            const [sessions, setSessions] = useState([]);
+            const [rightTab, setRightTab] = useState('playground'); // playground | traces
+            const [playgroundMessages, setPlaygroundMessages] = useState([]);
+            const [streamingAgent, setStreamingAgent] = useState(null);
+
+            // Session Management
+            const [activeSessionId, setActiveSessionId] = useState('playground');
+            const [activeTraceId, setActiveTraceId] = useState(null);
+
+            // Auto-select first trace if none selected
+            useEffect(() => {
+                if (sessions.length > 0 && !activeTraceId) {
+                    setActiveTraceId(sessions[0].session_id);
+                }
+            }, [sessions, activeTraceId]);
+
+            const handleContinueChat = (id) => {
+                setActiveSessionId(id);
+                const sess = sessions.find(s => s.session_id === id);
+                if (sess) setPlaygroundMessages(sess.messages || []);
+                setRightTab('playground');
+            };
+
+            // Architect Chat State
+            const [architectSessions, setArchitectSessions] = useState(() => {
+                const saved = localStorage.getItem('architectSessions');
+                return saved ? JSON.parse(saved) : [{ id: Date.now().toString(), name: 'Session 1', messages: [] }];
+            });
+            const [activeArchSessionId, setActiveArchSessionId] = useState(() => {
+                const saved = localStorage.getItem('activeArchSessionId');
+                return saved || Date.now().toString();
+            });
+
+            const activeArchSession = architectSessions.find(s => s.id === activeArchSessionId) || architectSessions[0];
+            const architectMessages = activeArchSession ? activeArchSession.messages : [];
+
+            useEffect(() => {
+                localStorage.setItem('architectSessions', JSON.stringify(architectSessions));
+                localStorage.setItem('activeArchSessionId', activeArchSessionId);
+            }, [architectSessions, activeArchSessionId]);
+
+            const updateArchitectMessages = (newMsgs) => {
+                setArchitectSessions(prev => prev.map(s => s.id === activeArchSessionId ? { ...s, messages: newMsgs } : s));
+            };
+
+            const createNewArchSession = () => {
+                const newId = Date.now().toString();
+                setArchitectSessions(prev => [...prev, { id: newId, name: `Session ${prev.length + 1}`, messages: [] }]);
+                setActiveArchSessionId(newId);
+            };
+
+            const [isArchitectTyping, setIsArchitectTyping] = useState(false);
+            const [isChatExpanded, setIsChatExpanded] = useState(false);
+
+            // Draggable State
+
+
+
+            const activeAgent = React.useMemo(() => {
+                return streamingAgent;
+            }, [streamingAgent]);
+
+            const displayNodes = React.useMemo(() => {
+                return nodes.map(n => {
+                    if (n.id === activeAgent) {
+                        return {
+                            ...n,
+                            style: {
+                                ...n.style,
+                                border: '3px solid #10b981',
+                                background: 'rgba(16, 185, 129, 0.25)',
+                                boxShadow: '0 0 40px 5px rgba(16, 185, 129, 0.6)',
+                                transition: 'all 0.3s ease'
+                            }
+                        };
+                    }
+                    if (n.id !== 'user' && !n.id.startsWith('tool-')) {
+                        return {
+                            ...n,
+                            style: {
+                                ...n.style,
+                                border: '1px solid rgba(99, 102, 241, 0.3)',
+                                boxShadow: '0 4px 20px -5px rgba(99, 102, 241, 0.1)',
+                                transition: 'all 0.3s ease'
+                            }
+                        };
+                    }
+                    return n;
+                });
+            }, [nodes, activeAgent]);
+
+            const onNodesChange = useCallback(changes => setNodes(nds => applyNodeChanges(changes, nds)), []);
+            const onEdgesChange = useCallback(changes => setEdges(eds => applyEdgeChanges(changes, eds)), []);
+
+            // Live Wireshark SSE Listener
+            useEffect(() => {
+                const sse = new EventSource('/api/stream/events');
+                sse.onmessage = (e) => {
+                    try {
+                        const event = JSON.parse(e.data);
+                        console.log("Wireshark Event:", event);
+
+                        if (event.type === 'tool_result' && event.data?.result?.includes('Transferred to')) {
+                            const match = event.data.result.match(/Transferred to (\\w+)/);
+                            if (match && match[1]) {
+                                setStreamingAgent(match[1]);
+                                // Briefly animate the edge
+                                setEdges(eds => eds.map(edge => {
+                                    if (edge.target === match[1]) {
+                                        return { ...edge, animated: true, style: { stroke: '#10b981', strokeWidth: 3 } };
+                                    }
+                                    return { ...edge, animated: false, style: {} };
+                                }));
+                                setTimeout(() => setEdges(eds => eds.map(edge => ({ ...edge, animated: false, style: {} }))), 3000);
+                            }
+                        } else if (event.type === 'tool_call') {
+                            const toolNodeId = `tool-${activeAgent}-${event.data.tool}`;
+                            // Flash the tool edge
+                            setEdges(eds => eds.map(edge => {
+                                if (edge.target === toolNodeId) {
+                                    return { ...edge, animated: true, style: { stroke: '#eab308', strokeWidth: 3 } };
+                                }
+                                return edge;
+                            }));
+                            setTimeout(() => setEdges(eds => eds.map(edge => (edge.target === toolNodeId ? { ...edge, animated: false, style: {} } : edge))), 2000);
+                        }
+                    } catch (err) { }
+                };
+                return () => sse.close();
+            }, [activeAgent]);
+
+            const onEdgesDelete = useCallback(async (edgesToDelete) => {
+                for (const edge of edgesToDelete) {
+                    if (edge.source === 'user' || edge.source.startsWith('tool-') || edge.target.startsWith('tool-')) continue;
+                    try {
+                        const res = await fetch('/api/graph/sync', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                agent_id: edge.source,
+                                target_id: edge.target,
+                                edge_type: 'handoff',
+                                action: 'remove'
+                            })
+                        });
+                        if (!res.ok) throw new Error("Delete failed");
+                    } catch (e) {
+                        console.error("Failed to delete edge in ai.yaml", e);
+                        alert("Failed to delete connection from ai.yaml.");
+                    }
+                }
+            }, []);
+
+            const onNodesDelete = useCallback((nodesToDelete) => {
+                alert("Node deletion is disabled in the UI to prevent data loss. Please remove the agent directly from ai.yaml or blueprint.md.");
+                fetchConfig(); // Refresh to restore the deleted node in the UI
+            }, []);
+
+            const onConnect = useCallback(async (params) => {
+                const { source, target } = params;
+                // Don't sync internal/fake nodes
+                if (source === 'user' || source.startsWith('tool-') || target.startsWith('tool-')) {
+                    setEdges((eds) => addEdge(params, eds));
+                    return;
+                }
+
+                try {
+                    const res = await fetch('/api/graph/sync', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            agent_id: source,
+                            target_id: target,
+                            edge_type: 'handoff'
+                        })
+                    });
+                    if (!res.ok) throw new Error("Sync failed");
+
+                    setEdges((eds) => addEdge({ ...params, style: { stroke: '#10b981', strokeWidth: 2, animation: 'dash 1s linear infinite' } }, eds));
+                } catch (e) {
+                    console.error("Failed to sync edge to ai.yaml", e);
+                    alert("Failed to sync structural change to ai.yaml.");
+                }
+            }, []);
+
+            const fetchConfig = async () => {
+                try {
+                    const res = await fetch('/api/config');
+                    const data = await res.json();
+
+                    let newNodes = [];
+                    let newEdges = [];
+
+                    const createHtmlLabel = (icon, title, subtitle) => `
+                        <div class="flex items-center gap-3 w-full overflow-hidden">
+                            <div class="flex-shrink-0 w-8 h-8 rounded-md bg-white/5 flex items-center justify-center text-lg">${icon}</div>
+                            <div class="flex flex-col text-left min-w-0 flex-1">
+                                <span class="text-sm font-medium text-white truncate w-full" title="${title}">${title}</span>
+                                ${subtitle ? `<span class="text-xs text-neutral-400 truncate w-full">${subtitle}</span>` : ''}
+                            </div>
+                        </div>
+                    `;
+
+                    const formatTitle = (str) => {
+                        return str.replace(/_/g, ' ')
+                            .split(' ')
+                            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                            .join(' ');
+                    };
+
+                    newNodes.push({
+                        id: 'user',
+                        type: 'default',
+                        sourcePosition: 'bottom',
+                        targetPosition: 'top',
+                        data: { label: <div dangerouslySetInnerHTML={{ __html: createHtmlLabel('👤', 'User', 'Input Entry') }} /> },
+                        position: { x: 300, y: 50 },
+                        style: { background: '#0a0a0a', width: 220, padding: '12px', border: '1px solid #262626', borderRadius: '12px' }
+                    });
+
+                    if (data.default_agent) {
+                        newEdges.push({
+                            id: `e-user-${data.default_agent}`,
+                            source: 'user',
+                            target: data.default_agent,
+                            animated: true,
+                            style: { stroke: '#6366f1', strokeWidth: 2 }
+                        });
+                    }
+
+                    let yOffset = 200;
+                    let xOffset = 50;
+
+                    if (data.agents) {
+                        Object.entries(data.agents).forEach(([agentName, agentData], index) => {
+                            newNodes.push({
+                                id: agentName,
+                                type: 'default',
+                                sourcePosition: 'bottom',
+                                targetPosition: 'top',
+                                data: { label: <div dangerouslySetInnerHTML={{ __html: createHtmlLabel('🤖', formatTitle(agentName), 'Agent') }} /> },
+                                position: { x: xOffset + (index * 280), y: yOffset },
+                                style: { background: '#171717', width: 240, padding: '12px', border: '1px solid #6366f150', borderRadius: '12px', boxShadow: '0 4px 20px -5px rgba(99,102,241,0.1)' }
+                            });
+
+                            if (agentData.handoffs) {
+                                agentData.handoffs.forEach(handoff => {
+                                    newEdges.push({
+                                        id: `e-${agentName}-${handoff}`,
+                                        source: agentName,
+                                        target: handoff,
+                                        markerEnd: { type: MarkerType.ArrowClosed, color: '#6366f1' },
+                                        style: { stroke: '#6366f1', strokeWidth: 2 }
+                                    });
+                                });
+                            }
+
+                            if (agentData.tools) {
+                                agentData.tools.forEach((t, tIdx) => {
+                                    const toolId = `tool-${agentName}-${t.name}`;
+                                    newNodes.push({
+                                        id: toolId,
+                                        type: 'default',
+                                        sourcePosition: 'bottom',
+                                        targetPosition: 'top',
+                                        data: { label: <div dangerouslySetInnerHTML={{ __html: createHtmlLabel('🔧', formatTitle(t.name), 'Tool / MCP') }} /> },
+                                        position: { x: xOffset + (index * 280) + (tIdx * 10) + 10, y: yOffset + 140 + (tIdx * 80) },
+                                        style: { background: '#0a0a0a', width: 240, padding: '10px', border: '1px solid #262626', borderRadius: '8px' }
+                                    });
+                                    newEdges.push({
+                                        id: `e-${agentName}-${toolId}`,
+                                        source: agentName,
+                                        target: toolId,
+                                        animated: true,
+                                        style: { stroke: '#6366f1', strokeDasharray: '4,4' }
+                                    });
+                                });
+                            }
+                        });
+                    }
+
+                    setNodes(newNodes);
+                    setEdges(newEdges);
+                } catch (e) {
+                    console.error("Config fetch error:", e);
+                }
+            };
+
+            const fetchMemory = async () => {
+                try {
+                    const res = await fetch('/api/memory');
+                    const data = await res.json();
+                    if (Array.isArray(data)) {
+                        setSessions(data);
+                    } else {
+                        console.error("Backend Error fetching memory:", data);
+                        setSessions([]);
+                    }
+                } catch (e) {
+                    console.error("Network Error fetching memory:", e);
+                    setSessions([]);
+                }
+            };
+
+            const handleManualSync = () => {
+                fetchConfig();
+                fetchMemory();
+            };
+
+            const handleBlueprintSync = async () => {
+                try {
+                    const btn = document.activeElement;
+                    if (btn) btn.disabled = true;
+                    const response = await fetch('/api/blueprint/sync', { method: 'POST' });
+                    if (!response.ok) throw new Error('Failed to sync blueprint');
+                    alert('Successfully reverse-synced ai.yaml to blueprint.md!');
+                } catch (e) {
+                    alert(e.message);
+                } finally {
+                    const btn = document.activeElement;
+                    if (btn) btn.disabled = false;
+                }
+            };
+
+            useEffect(() => {
+                fetchConfig();
+                fetchMemory();
+                const interval = setInterval(() => {
+                    fetchConfig();
+                    fetchMemory();
+                }, 3000);
+                return () => clearInterval(interval);
+            }, []);
+
+            return (
+                <div className="flex flex-col h-full bg-background w-full">
+                    <NavBar onSync={handleManualSync} onSyncBlueprint={handleBlueprintSync} mainTab={mainTab} setMainTab={setMainTab} />
+
+                    {mainTab === 'dashboard' ? (
+                        <div className="flex flex-1 overflow-hidden relative">
+                            <div className={`${isRightPaneOpen ? 'w-[55%]' : 'w-full'} relative flex flex-col bg-background border-r border-border transition-all duration-300`}>
+                                <div className="absolute top-4 left-4 z-10 flex items-center gap-2 bg-surface/80 backdrop-blur px-3 py-1.5 rounded-md border border-border shadow-sm">
+                                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                                    <span className="text-xs font-medium text-neutral-300">Live Architecture</span>
+                                </div>
+
+                                <button
+                                    onClick={() => setIsRightPaneOpen(!isRightPaneOpen)}
+                                    className="absolute top-4 right-4 z-10 p-2 bg-surface/80 hover:bg-surface backdrop-blur rounded-md border border-border shadow-sm text-neutral-400 hover:text-white transition-colors"
+                                    title={isRightPaneOpen ? "Expand ReactFlow" : "Show Traces Pane"}
+                                >
+                                    {isRightPaneOpen ? (
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+                                    ) : (
+                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
+                                    )}
+                                </button>
+
+                                <div
+                                    className={`absolute z-20 bottom-0 right-10 bg-surface backdrop-blur-xl border border-border shadow-2xl flex flex-col overflow-hidden transition-all duration-300 rounded-t-xl w-80 ${isChatExpanded ? 'h-[60vh]' : 'h-12'}`}
+                                >
+                                    <div
+                                        onClick={() => setIsChatExpanded(!isChatExpanded)}
+                                        className="h-12 px-4 bg-primary/10 hover:bg-primary/20 border-b border-border flex justify-between items-center cursor-pointer transition-colors"
+                                    >
+                                        <div className="flex items-center gap-2">
+                                            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                                            <span className="font-semibold text-sm text-white">IntaGrin Architect</span>
+                                        </div>
+                                        <div className="flex items-center gap-3">
+                                            {isChatExpanded && (
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); updateArchitectMessages([]); }}
+                                                    className="text-xs text-neutral-400 hover:text-white"
+                                                >
+                                                    Clear
+                                                </button>
+                                            )}
+                                            <svg className={`w-4 h-4 text-neutral-400 transform transition-transform ${isChatExpanded ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+                                            </svg>
+                                        </div>
+                                    </div>
+
+                                    <div className={`flex-1 overflow-y-auto p-4 space-y-4 bg-black/20 ${!isChatExpanded ? 'hidden' : ''}`}>
+                                        {architectMessages.map((msg, idx) => (
+                                            <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                                <div
+                                                    className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm prose prose-invert prose-sm ${msg.role === 'user' ? 'bg-primary text-white rounded-br-none' : 'bg-white/10 text-neutral-200 rounded-bl-none'}`}
+                                                    dangerouslySetInnerHTML={{ __html: msg.role === 'assistant' && typeof marked !== 'undefined' ? marked.parse(msg.content || "") : msg.content }}
+                                                />
+
+                                                {/* Approval UI */}
+                                                {msg.proposed_changes && msg.proposed_changes.files_to_write && msg.proposed_changes.files_to_write.length > 0 && (
+                                                    <div className="mt-2 p-3 bg-neutral-900 border border-neutral-700 rounded-xl w-[85%]">
+                                                        <div className="text-xs text-neutral-400 mb-2 font-semibold">PROPOSED CHANGES</div>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {msg.proposed_changes.files_to_write.map(f => (
+                                                                <span key={f.filepath} className="px-2 py-1 bg-neutral-800 rounded text-xs text-blue-400">
+                                                                    {f.filepath}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                        {msg.applied ? (
+                                                            <div className="mt-3 text-xs text-green-400 font-bold flex items-center gap-1">
+                                                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                                                                Changes Applied
+                                                            </div>
+                                                        ) : (
+                                                            <button
+                                                                className="mt-3 w-full py-1.5 bg-primary hover:bg-indigo-500 rounded text-xs text-white font-bold transition-colors"
+                                                                onClick={async () => {
+                                                                    try {
+                                                                        const res = await fetch('/api/architect/apply', {
+                                                                            method: 'POST',
+                                                                            headers: { 'Content-Type': 'application/json' },
+                                                                            body: JSON.stringify(msg.proposed_changes)
+                                                                        });
+                                                                        if (res.ok) {
+                                                                            const newMsgs = [...architectMessages];
+                                                                            newMsgs[idx].applied = true;
+                                                                            updateArchitectMessages(newMsgs);
+                                                                            fetchConfig();
+                                                                        }
+                                                                    } catch (e) {
+                                                                        alert("Failed to apply changes");
+                                                                    }
+                                                                }}
+                                                            >
+                                                                Approve & Apply
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                        {isArchitectTyping && (
+                                            <div className="flex justify-start">
+                                                <div className="bg-white/10 text-neutral-400 rounded-2xl rounded-bl-none px-4 py-2 text-sm animate-pulse flex items-center gap-2">
+                                                    <div className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0s' }}></div>
+                                                    <div className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                                                    <div className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className={`p-3 border-t border-border bg-black/20 flex gap-2 items-center ${!isChatExpanded ? 'hidden' : ''}`}>
+                                        <select
+                                            className="bg-surface border border-border rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-primary"
+                                            value={activeArchSessionId}
+                                            onChange={(e) => {
+                                                if (e.target.value === 'new') createNewArchSession();
+                                                else setActiveArchSessionId(e.target.value);
+                                            }}
+                                        >
+                                            {architectSessions.map(s => (
+                                                <option key={s.id} value={s.id}>{s.name}</option>
+                                            ))}
+                                            <option value="new">+ New Session</option>
+                                        </select>
+                                        <input
+                                            type="text"
+                                            className="flex-1 bg-surface border border-border rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-primary text-white placeholder-neutral-500"
+                                            placeholder="Tell Architect to modify agents, tools, or routing..."
+                                            onKeyDown={async (e) => {
+                                                if (e.key === 'Enter' && e.target.value.trim()) {
+                                                    const val = e.target.value;
+                                                    e.target.value = '';
+                                                    const newMsgs = [...architectMessages, { role: 'user', content: val }];
+                                                    updateArchitectMessages(newMsgs);
+                                                    setIsArchitectTyping(true);
+                                                    try {
+                                                        const res = await fetch('/api/architect', {
+                                                            method: 'POST',
+                                                            headers: { 'Content-Type': 'application/json' },
+                                                            body: JSON.stringify({ messages: newMsgs.map(m => ({ role: m.role, content: m.content || "" })) })
+                                                        });
+                                                        if (res.ok) {
+                                                            const data = await res.json();
+                                                            updateArchitectMessages([...newMsgs, {
+                                                                role: 'assistant',
+                                                                content: data.message || "Done.",
+                                                                proposed_changes: data
+                                                            }]);
+                                                        } else {
+                                                            let errorText = "Unknown Server Error";
+                                                            try {
+                                                                const err = await res.json();
+                                                                if (typeof err.detail === 'string') errorText = err.detail;
+                                                                else if (Array.isArray(err.detail)) errorText = err.detail.map(e => e.msg).join(', ');
+                                                            } catch (e) {
+                                                                errorText = "Failed to parse error response.";
+                                                            }
+                                                            updateArchitectMessages([...newMsgs, { role: 'assistant', content: "Error: " + errorText }]);
+                                                        }
+                                                    } catch (err) {
+                                                        updateArchitectMessages([...newMsgs, { role: 'assistant', content: "Network error connecting to Architect." }]);
+                                                    } finally {
+                                                        setIsArchitectTyping(false);
+                                                    }
+                                                }
+                                            }}
+                                        />
+                                        <div className="text-[10px] text-neutral-400 font-bold uppercase tracking-wider pr-3">Press Enter</div>
+                                    </div>
+                                </div>
+
+
+                                <ReactFlow
+                                    nodes={displayNodes}
+                                    edges={edges}
+                                    onNodesChange={onNodesChange}
+                                    onEdgesChange={onEdgesChange}
+                                    onConnect={onConnect}
+                                    onEdgesDelete={onEdgesDelete}
+                                    onNodesDelete={onNodesDelete}
+                                    fitView
+                                >
+                                    <Background color="#262626" gap={20} size={1.5} />
+                                    <Controls />
+                                </ReactFlow>
+                            </div>
+
+                            {isRightPaneOpen && (
+                                <div className="w-[45%] flex flex-col bg-surface/30">
+                                    <div className="px-4 pt-3 border-b border-border bg-surface/50 backdrop-blur-sm flex gap-6">
+                                        <button onClick={() => setRightTab('traces')} className={`text-sm font-semibold pb-3 border-b-2 transition-colors ${rightTab === 'traces' ? 'border-primary text-primary' : 'border-transparent text-neutral-500 hover:text-neutral-300'}`}>Execution Traces</button>
+                                        <button onClick={() => setRightTab('playground')} className={`text-sm font-semibold pb-3 border-b-2 transition-colors ${rightTab === 'playground' ? 'border-primary text-primary' : 'border-transparent text-neutral-500 hover:text-neutral-300'}`}>Agent Playground</button>
+                                    </div>
+
+                                    <div className="flex-1 overflow-hidden relative">
+                                        {rightTab === 'playground' ? (
+                                            <Playground fetchMemory={fetchMemory} messages={playgroundMessages} setMessages={setPlaygroundMessages} streamingAgent={streamingAgent} setStreamingAgent={setStreamingAgent} sessions={sessions} activeSessionId={activeSessionId} setActiveSessionId={setActiveSessionId} />
+                                        ) : (
+                                            <div className="flex h-full overflow-hidden">
+                                                {/* Sidebar */}
+                                                <div className="w-1/3 border-r border-border bg-surface/20 overflow-y-auto flex flex-col">
+                                                    <div className="px-4 py-3 border-b border-border text-xs font-semibold text-neutral-400 uppercase tracking-wider sticky top-0 bg-surface/90 backdrop-blur z-10">
+                                                        Session History
+                                                    </div>
+                                                    {sessions.length === 0 ? (
+                                                        <div className="p-4 text-xs text-neutral-500 text-center">No active sessions.</div>
+                                                    ) : (
+                                                        sessions.map(s => (
+                                                            <button
+                                                                key={s.session_id}
+                                                                onClick={() => setActiveTraceId(s.session_id)}
+                                                                className={`text-left px-4 py-3 border-b border-border/50 hover:bg-surface transition-colors ${activeTraceId === s.session_id ? 'bg-primary/10 border-l-2 border-l-primary' : 'border-l-2 border-l-transparent'}`}
+                                                            >
+                                                                <div className="text-xs font-mono text-neutral-300 truncate mb-1" title={s.session_id}>{s.session_id}</div>
+                                                                <div className="flex justify-between items-center text-[10px] text-neutral-500">
+                                                                    <span>{s.messages?.length || 0} msgs</span>
+                                                                    {s.state?._metrics && <span>${(s.state._metrics.total_cost || 0).toFixed(4)}</span>}
+                                                                </div>
+                                                            </button>
+                                                        ))
+                                                    )}
+                                                </div>
+
+                                                {/* Main Content */}
+                                                <div className="w-2/3 h-full overflow-y-auto p-4 bg-background/50">
+                                                    {sessions.length === 0 ? (
+                                                        <div className="flex flex-col items-center justify-center h-full text-neutral-500">
+                                                            <svg className="w-12 h-12 mb-4 opacity-20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+                                                            </svg>
+                                                            <p className="text-sm">No active sessions found.</p>
+                                                        </div>
+                                                    ) : (
+                                                        activeTraceId && sessions.find(s => s.session_id === activeTraceId) ? (
+                                                            <SessionCard
+                                                                session={sessions.find(s => s.session_id === activeTraceId)}
+                                                                onContinueChat={handleContinueChat}
+                                                            />
+                                                        ) : (
+                                                            <div className="flex items-center justify-center h-full text-neutral-500 text-sm">
+                                                                Select a session from the sidebar to view its trace.
+                                                            </div>
+                                                        )
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    ) : (
+                        <DocsViewer />
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<Monitor />);
+    </script>{% endraw %}
+</body>
+
+</html>

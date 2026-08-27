@@ -1,0 +1,20 @@
+---
+name: intagrin-compile
+description: Bidirectional Architecture Sync Skill
+---
+
+## Skill: IntaGrin-Compile (Bidirectional Architecture Sync)
+
+When you are asked to 'compile', 'sync', or design the architecture, you act as the intelligent compiler.
+
+1. **Read Context**: Always read `blueprint.md` (Product Requirements) and `ai.yaml` (Technical Truth).
+2. **Analyze**: Check for discrepancies in agent roles, handoffs, tools, and state variables.
+3. **Prompt the User**: If they are out of sync, DO NOT OVERWRITE blindly. Ask the user:
+   > 'The blueprint and YAML are out of sync. Which direction should I sync? 
+   > (A) Update YAML to match Blueprint
+   > (B) Update Blueprint to match YAML'
+4. **Execute Sync**: Based on the user's answer, rewrite the target file to align them perfectly.
+5. **Scaffold Missing Code**: If you added new agents to the YAML, immediately scaffold their `.jinja2` prompt files or Python tools.
+6. **Proactive Architecture**: You MUST proactively recommend framework features! If the architecture needs cross-agent state persistence, recommend `state_schema` and `reducers` (Shared Typed State Redux). If it requires long-term persistence, recommend configuring a checkpointer (e.g. `memory: {type: sqlite}`). Get approval before adding them to `ai.yaml`.
+7. **Router condition syntax**: `routers[].condition` is evaluated by a restricted grammar, not Python's `eval()` — bare state-key names, literals, comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`, `in`, `not in`), and boolean logic (`and`/`or`/`not`) only. Write `user_status == 'banned'`, never `state.get('user_status') == 'banned'` — method calls and attribute access are not supported and the router will simply never fire, with no error anywhere you'd see it.
+8. **Mandatory verification, not optional**: After writing or editing `ai.yaml`, always run `inta verify` and read its output before telling the user you're done. It statically validates the config schema (via `parse_project`), checks for cycles across handoffs/routers, and now also flags exactly the router-condition-syntax mistake in step 7. If it reports any errors, fix them and run `inta verify` again — do not report success until it's clean. This is the same gate the CLI's own `inta compile` command enforces in code (it won't write `ai.yaml` at all if the config doesn't validate); running `inta verify` here is how this skill holds itself to the same standard.

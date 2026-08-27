@@ -1,0 +1,17 @@
+{
+  "name": "intagrin-docs",
+  "version": "1.0.0",
+  "description": "Documentation site and browser test suite for IntaGrin, a declarative multi-agent LLM framework",
+  "scripts": {
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
+    "test:monitor": "node --test tests/browser/*.test.js"
+  },
+  "devDependencies": {
+    "vitepress": "^1.0.2"
+  },
+  "dependencies": {
+    "puppeteer": "^25.8.0"
+  }
+}
