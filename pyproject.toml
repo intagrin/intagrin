@@ -9,7 +9,7 @@ description = "The definitive Python framework for enterprise AI agents and auto
 readme = "README.md"
 license = "Apache-2.0"
 authors = [
-    { name = "Anoop P S", email = "[EMAIL_ADDRESS]" },
+    { name = "Anoop P S" },
 ]
 requires-python = ">=3.11"
 dependencies = [
