@@ -265,7 +265,7 @@ agents:
 
 ## 📖 Full Documentation
 
-The hosted docs site — **<https://intagrin.github.io/intagrin/>** — covers the `ai.yaml` reference,
+The hosted docs site — **<https://docs.intagrin.com/>** — covers the `ai.yaml` reference,
 tools/MCP integration, RAG, human-in-the-loop, deployment, and the API. The [`docs/`](./docs) folder
 in this repository is the source those pages are built from, and is the source of truth for what
 the current code does if the two ever drift.
