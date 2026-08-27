@@ -10,7 +10,7 @@ export default defineConfig({
     siteTitle: "IntaGrin",
     nav: [
       { text: "Documentation", link: "/01_Getting_Started" },
-      { text: "GitHub", link: "https://github.com/anoop/ai-platform" }
+      { text: "GitHub", link: "https://github.com/intagrin/intagrin" }
     ],
     sidebar: [
       {
@@ -72,7 +72,7 @@ export default defineConfig({
       }
     ],
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/anoop/ai-platform' }
+      { icon: 'github', link: 'https://github.com/intagrin/intagrin' }
     ],
     footer: {
       message: 'Released under the Apache 2.0 License.',
