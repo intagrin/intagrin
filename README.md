@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="docs/assets/logo3.png" alt="IntaGrin Logo" width="200"/>
+    <img src="https://raw.githubusercontent.com/intagrin/intagrin/main/docs/assets/logo3.png" alt="IntaGrin Logo" width="200"/>
 </p>
 
 <p align="center">
@@ -206,11 +206,11 @@ need the model's judgment. State reducers, tool scoping, and circuit breakers ar
 the same `ai.yaml`.
 
 <p align="center">
-    <img src="docs/assets/diagram.png" alt="IntaGrin Logo" width="600"/>
+    <img src="https://raw.githubusercontent.com/intagrin/intagrin/main/docs/assets/diagram.png" alt="IntaGrin Logo" width="600"/>
 </p>
 
 <p align="center">
-    <img src="docs/assets/workflow.png" alt="IntaGrin Logo" width="600"/>
+    <img src="https://raw.githubusercontent.com/intagrin/intagrin/main/docs/assets/workflow.png" alt="IntaGrin Logo" width="600"/>
 </p>
 
 ```yaml
