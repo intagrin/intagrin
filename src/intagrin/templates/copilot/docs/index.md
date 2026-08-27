@@ -6,7 +6,8 @@ hero:
   text: "A declarative framework for building multi-agent LLM systems in YAML"
   tagline: Describe agents, handoffs, tools, and guardrails in ai.yaml — verified before you run them, not just prompted and hoped for.
   image:
-    src: /assets/logo3.png
+    light: /assets/logo2.png
+    dark: /assets/logo3.png
     alt: IntaGrin
   actions:
     - theme: brand
