@@ -8,6 +8,9 @@ version = "1.0.0"
 description = "The definitive Python framework for enterprise AI agents and autonomous swarms."
 readme = "README.md"
 license = "Apache-2.0"
+authors = [
+    { name = "Anoop P S", email = "[EMAIL_ADDRESS]" },
+]
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12.0",
@@ -30,6 +33,11 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["psycopg[binary,pool]>=3.1.0"]
 redis = ["redis>=5.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/intagrin/intagrin"
+Repository = "https://github.com/intagrin/intagrin"
+Issues = "https://github.com/intagrin/intagrin/issues"
 
 [project.scripts]
 inta = "intagrin.cli:app"
