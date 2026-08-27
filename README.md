@@ -265,9 +265,10 @@ agents:
 
 ## 📖 Full Documentation
 
-The [`docs/`](./docs) folder in this repository covers the `ai.yaml` reference, tools/MCP
-integration, RAG, human-in-the-loop, deployment, and the API — that's the source of truth for what
-the current code does. A hosted docs site may also be published at <a href="https://intagrin.ai">intagrin.ai</a>.
+The hosted docs site — **<https://intagrin.github.io/intagrin/>** — covers the `ai.yaml` reference,
+tools/MCP integration, RAG, human-in-the-loop, deployment, and the API. The [`docs/`](./docs) folder
+in this repository is the source those pages are built from, and is the source of truth for what
+the current code does if the two ever drift.
 
 ---
 

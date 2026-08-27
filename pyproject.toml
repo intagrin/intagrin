@@ -36,6 +36,7 @@ redis = ["redis>=5.0.0"]
 
 [project.urls]
 Homepage = "https://github.com/intagrin/intagrin"
+Documentation = "https://intagrin.github.io/intagrin/"
 Repository = "https://github.com/intagrin/intagrin"
 Issues = "https://github.com/intagrin/intagrin/issues"
 
