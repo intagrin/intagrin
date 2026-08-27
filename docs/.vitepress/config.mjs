@@ -3,7 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: "IntaGrin",
   description: "A declarative framework for building multi-agent LLM systems in YAML",
-  base: "/ai-platform/",
+  base: "/intagrin/",
   cleanUrls: true,
   themeConfig: {
     logo: { text: "⚡ IntaGrin" },
