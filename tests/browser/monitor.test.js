@@ -146,6 +146,84 @@ test('Playground shows a seeded session\'s history on load, with no message sent
   }
 });
 
+test('Thermodynamic HUD sits in the header as a badge and never overlaps the transcript', async () => {
+  // Regression test: the HUD used to be an absolutely-positioned card floating at
+  // top-16/right-4 over the message list — with a right-aligned user bubble appearing near the
+  // top of a short conversation (exactly this seeded session's shape), it visibly covered it.
+  const page = await browser.newPage();
+  try {
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      () => document.body.innerText.includes('Hello, is my history visible?'),
+      { timeout: 15000 }
+    );
+
+    // The compact badge (cost/token summary) must be present and visible.
+    await page.waitForFunction(
+      () => document.body.innerText.includes('0.00070'),
+      { timeout: 10000 }
+    );
+
+    const overlap = await page.evaluate(() => {
+      const badge = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent.includes('0.00070')
+      );
+      const userBubble = [...document.querySelectorAll('*')].find(
+        (el) =>
+          el.children.length === 0 && el.textContent.trim() === 'Hello, is my history visible?'
+      );
+      if (!badge || !userBubble) return { found: false };
+      const b = badge.getBoundingClientRect();
+      const m = userBubble.getBoundingClientRect();
+      const intersects = !(b.right < m.left || b.left > m.right || b.bottom < m.top || b.top > m.bottom);
+      return { found: true, intersects, badgeRect: b, messageRect: m };
+    });
+
+    assert.ok(overlap.found, 'expected to find both the HUD badge and the seeded user message bubble');
+    assert.ok(
+      !overlap.intersects,
+      `expected the HUD badge to never overlap the message transcript, got badge=${JSON.stringify(overlap.badgeRect)} message=${JSON.stringify(overlap.messageRect)}`
+    );
+
+    // Clicking the badge expands the full detail card (still anchored under the badge, not
+    // floating over the transcript) — same information as before, just non-blocking by default.
+    const clicked = await page.evaluate(() => {
+      const badge = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent.includes('0.00070')
+      );
+      if (!badge) return false;
+      badge.click();
+      return true;
+    });
+    assert.ok(clicked, 'expected a clickable HUD badge');
+
+    // The title renders visually uppercase via CSS text-transform (same gotcha as "ACTIVE
+    // SESSION"/"APPROVAL REQUIRED" elsewhere in this file), so innerText reports it as
+    // "THERMODYNAMIC HUD" even though the JSX source is mixed-case.
+    await page.waitForFunction(
+      () => document.body.innerText.toUpperCase().includes('THERMODYNAMIC HUD'),
+      { timeout: 5000 }
+    );
+    const expandedText = await page.evaluate(() => document.body.innerText);
+    assert.ok(expandedText.includes('Burn Rate:'), 'expected the expanded card to show Burn Rate');
+    assert.ok(expandedText.includes('Context Window:'), 'expected the expanded card to show Context Window');
+
+    // Clicking again collapses it back.
+    await page.evaluate(() => {
+      const badge = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent.includes('0.00070')
+      );
+      badge.click();
+    });
+    await page.waitForFunction(
+      () => !document.body.innerText.toUpperCase().includes('THERMODYNAMIC HUD'),
+      { timeout: 5000 }
+    );
+  } finally {
+    await page.close();
+  }
+});
+
 test('Playground for a different, never-seeded session stays empty (history load is scoped correctly)', async () => {
   const page = await browser.newPage();
   try {

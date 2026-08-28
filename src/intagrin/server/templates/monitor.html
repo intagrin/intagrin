@@ -605,6 +605,13 @@
         const Playground = ({ fetchMemory, messages, setMessages, streamingAgent, setStreamingAgent, sessions, activeSessionId, setActiveSessionId, contextWindow }) => {
             const [input, setInput] = useState('');
             const [loading, setLoading] = useState(false);
+            // The Thermodynamic HUD used to float absolutely over the message list (top-16
+            // right-4) — with min-w-[250px] sitting right where right-aligned user bubbles
+            // appear near the top of a short conversation, it visibly covered them. Now it's a
+            // compact, always-visible badge inline in the header (structurally can't overlap
+            // anything below it) that expands to the original detailed card as a popover only
+            // when clicked, anchored under the badge instead of over the transcript.
+            const [hudExpanded, setHudExpanded] = useState(false);
             const playgroundSession = (sessions || []).find(s => s.session_id === activeSessionId);
 
             // Chat-window view of `messages` — excludes tool/system plumbing and content-less
@@ -726,35 +733,52 @@
                                 }}
                             />
                         </div>
-                        <button
-                            onClick={() => {
-                                const newId = 'session_' + Math.random().toString(36).substring(2, 9);
-                                setActiveSessionId(newId);
-                                setMessages([]);
-                            }}
-                            className="text-[10px] font-bold uppercase tracking-wider bg-white/5 hover:bg-white/10 text-neutral-300 px-3 py-1.5 rounded border border-white/10 transition-colors shadow-sm"
-                        >
-                            + New Session
-                        </button>
-                    </div>
-
-                    {/* Thermodynamic HUD */}
-                    {playgroundSession && playgroundSession.state?._metrics && (
-                        <div className="absolute top-16 right-4 z-10 bg-surface/90 backdrop-blur border border-border shadow-lg rounded-lg p-3 flex flex-col gap-2 min-w-[250px]">
-                            <div className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider mb-1">Thermodynamic HUD</div>
-                            <div className="flex justify-between items-center text-xs">
-                                <span className="text-neutral-300">Burn Rate:</span>
-                                <span className="font-mono text-emerald-400 font-medium">${Number(playgroundSession.state._metrics.total_cost || 0).toFixed(5)}</span>
-                            </div>
-                            <div className="flex justify-between items-center text-xs">
-                                <span className="text-neutral-300">Context Window:</span>
-                                <span className="font-mono text-blue-400 font-medium">{Number(playgroundSession.state._metrics.total_tokens || 0).toLocaleString()} / {(contextWindow / 1000).toFixed(0)}k</span>
-                            </div>
-                            <div className="w-full bg-background rounded-full h-1.5 mt-1 border border-neutral-800 overflow-hidden">
-                                <div className="bg-emerald-500 h-1.5 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" style={{ width: `${Math.min((Number(playgroundSession.state._metrics.total_tokens || 0) / (contextWindow || 128000)) * 100, 100)}%` }}></div>
-                            </div>
+                        <div className="flex items-center gap-2">
+                            {/* Thermodynamic HUD — a compact badge inline in the header, never
+                                overlapping the transcript below; click to expand the full detail
+                                card as a popover anchored under the badge instead of floating
+                                over the chat. */}
+                            {playgroundSession && playgroundSession.state?._metrics && (
+                                <div className="relative">
+                                    <button
+                                        onClick={() => setHudExpanded(prev => !prev)}
+                                        title="Thermodynamic HUD — live burn rate and context usage"
+                                        className="flex items-center gap-2 text-[10px] font-mono bg-white/5 hover:bg-white/10 text-neutral-300 px-2.5 py-1.5 rounded border border-white/10 transition-colors shadow-sm"
+                                    >
+                                        <span className="text-emerald-400 font-medium">${Number(playgroundSession.state._metrics.total_cost || 0).toFixed(5)}</span>
+                                        <span className="text-neutral-600">|</span>
+                                        <span className="text-blue-400 font-medium">{Number(playgroundSession.state._metrics.total_tokens || 0).toLocaleString()}/{(contextWindow / 1000).toFixed(0)}k</span>
+                                    </button>
+                                    {hudExpanded && (
+                                        <div className="absolute top-full right-0 mt-1 z-30 bg-surface/95 backdrop-blur border border-border shadow-lg rounded-lg p-3 flex flex-col gap-2 min-w-[250px]">
+                                            <div className="text-[10px] font-bold text-neutral-400 uppercase tracking-wider mb-1">Thermodynamic HUD</div>
+                                            <div className="flex justify-between items-center text-xs">
+                                                <span className="text-neutral-300">Burn Rate:</span>
+                                                <span className="font-mono text-emerald-400 font-medium">${Number(playgroundSession.state._metrics.total_cost || 0).toFixed(5)}</span>
+                                            </div>
+                                            <div className="flex justify-between items-center text-xs">
+                                                <span className="text-neutral-300">Context Window:</span>
+                                                <span className="font-mono text-blue-400 font-medium">{Number(playgroundSession.state._metrics.total_tokens || 0).toLocaleString()} / {(contextWindow / 1000).toFixed(0)}k</span>
+                                            </div>
+                                            <div className="w-full bg-background rounded-full h-1.5 mt-1 border border-neutral-800 overflow-hidden">
+                                                <div className="bg-emerald-500 h-1.5 rounded-full shadow-[0_0_8px_rgba(16,185,129,0.5)]" style={{ width: `${Math.min((Number(playgroundSession.state._metrics.total_tokens || 0) / (contextWindow || 128000)) * 100, 100)}%` }}></div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                            <button
+                                onClick={() => {
+                                    const newId = 'session_' + Math.random().toString(36).substring(2, 9);
+                                    setActiveSessionId(newId);
+                                    setMessages([]);
+                                }}
+                                className="text-[10px] font-bold uppercase tracking-wider bg-white/5 hover:bg-white/10 text-neutral-300 px-3 py-1.5 rounded border border-white/10 transition-colors shadow-sm"
+                            >
+                                + New Session
+                            </button>
                         </div>
-                    )}
+                    </div>
 
                     <div ref={playgroundScrollRef} className="flex-1 overflow-y-auto p-4 space-y-4 pb-20 pt-16">
                         {visibleMessages.length === 0 ? (
