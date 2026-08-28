@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-    <img src="https://img.shields.io/badge/version-1.0.0-blue.svg" alt="Version 1.0.0"/>
+    <img src="https://img.shields.io/badge/version-0.1.0-blue.svg" alt="Version 0.1.0"/>
     <a href="./LICENSE">
         <img src="https://img.shields.io/badge/License-Apache%202.0-success.svg" alt="License"/>
     </a>

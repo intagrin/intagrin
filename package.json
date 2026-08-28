@@ -1,6 +1,6 @@
 {
   "name": "intagrin-docs",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Documentation site and browser test suite for IntaGrin, a declarative multi-agent LLM framework",
   "scripts": {
     "docs:dev": "vitepress dev docs",
