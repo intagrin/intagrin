@@ -5,8 +5,11 @@ export default defineConfig({
   description: "A declarative framework for building multi-agent LLM systems in YAML",
   base: "/",
   cleanUrls: true,
+  head: [
+    ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }]
+  ],
   themeConfig: {
-    logo: { text: "⚡ IntaGrin" },
+    logo: "/assets/nav-logo.png",
     siteTitle: "IntaGrin",
     nav: [
       { text: "Documentation", link: "/01_Getting_Started" },
