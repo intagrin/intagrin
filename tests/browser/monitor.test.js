@@ -10,6 +10,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const puppeteer = require('puppeteer');
 
 const {
@@ -795,6 +797,110 @@ test('Approving a paused tool call shows what /resume actually returned, not a b
     assert.ok(
       !streamCalled,
       'must not blindly fire a second /api/stream call ("Yes, proceed.") on top of what /resume already returned'
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+test('Approval card renders tool arguments and previews a generated image inline', async () => {
+  // Reproduces the actual feature request: an Instagram-content-creator style agent's
+  // requires_approval tool pauses with args like {caption, hashtags, image_path} — before this,
+  // the Approval card showed only the tool name, with no way to see (let alone preview) what was
+  // actually being approved: no argument rendering, no media rendering, and no route serving
+  // project files to the browser at all.
+  const IMAGE_APPROVAL_SESSION_ID = 'image-approval-demo';
+  const TINY_PNG_BASE64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const imagesDir = path.join(projectDir, 'generated_images');
+  fs.mkdirSync(imagesDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(imagesDir, 'preview_test.png'),
+    Buffer.from(TINY_PNG_BASE64, 'base64')
+  );
+
+  seedSession(
+    projectDir,
+    IMAGE_APPROVAL_SESSION_ID,
+    [{ role: 'user', content: 'Create an Instagram post about coffee.' }],
+    {
+      _metrics: { total_tokens: 5, total_cost: 0.0001 },
+      _pending_approval: {
+        tool: 'review_content',
+        args: {
+          caption: 'Fresh coffee, fresh start.',
+          hashtags: ['#coffee', '#morning'],
+          image_path: 'generated_images/preview_test.png',
+        },
+        status: 'awaiting_approval',
+        tool_call_id: 'call_1',
+      },
+    }
+  );
+
+  const page = await browser.newPage();
+  try {
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      () => document.body.innerText.toUpperCase().includes('ACTIVE SESSION'),
+      { timeout: 15000 }
+    );
+
+    // The session search box only shows up once a session is active — same flow the "Approving
+    // a paused tool call" test above uses.
+    const openedFirst = await page.evaluate((currentId) => {
+      const btn = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent.includes(currentId)
+      );
+      if (!btn) return false;
+      btn.click();
+      return true;
+    }, SEEDED_SESSION_ID);
+    assert.ok(openedFirst, 'expected a session-selector button showing the active session id');
+
+    await page.waitForSelector('input[placeholder="Search sessions..."]', { timeout: 5000 });
+    await page.type('input[placeholder="Search sessions..."]', IMAGE_APPROVAL_SESSION_ID);
+    await page.waitForFunction(
+      (id) => document.body.innerText.includes(id),
+      { timeout: 5000 },
+      IMAGE_APPROVAL_SESSION_ID
+    );
+    const selected = await page.evaluate((id) => {
+      const row = [...document.querySelectorAll('button')].find((b) => b.textContent.includes(id));
+      if (!row) return false;
+      row.click();
+      return true;
+    }, IMAGE_APPROVAL_SESSION_ID);
+    assert.ok(selected, 'expected a clickable row for the image-approval-demo session');
+
+    await page.waitForFunction(
+      () => document.body.innerText.toUpperCase().includes('APPROVAL REQUIRED'),
+      { timeout: 10000 }
+    );
+
+    const bodyText = await page.evaluate(() => document.body.innerText);
+    assert.ok(
+      bodyText.includes('Fresh coffee, fresh start.'),
+      'expected the pending caption argument to render, not just the tool name'
+    );
+    assert.ok(
+      bodyText.includes('generated_images/preview_test.png'),
+      'expected the pending image_path argument to render as text too'
+    );
+
+    // The <img> must exist, point at the new file-serving endpoint, and actually finish loading
+    // (not silently fall back via MediaPreview's onError) — proving the full pipeline (argument
+    // rendering -> media detection -> GET /api/files -> real bytes -> browser decode) works.
+    await page.waitForSelector('img[src*="/api/files/generated_images/preview_test.png"]', {
+      timeout: 10000,
+    });
+    const loaded = await page.evaluate(() => {
+      const img = document.querySelector('img[src*="/api/files/generated_images/preview_test.png"]');
+      return !!img && img.complete && img.naturalWidth > 0;
+    });
+    assert.ok(
+      loaded,
+      'expected the previewed image to actually finish loading, not show a broken-image fallback'
     );
   } finally {
     await page.close();

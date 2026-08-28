@@ -19,6 +19,7 @@ from intagrin.server.monitor import (
     get_docs,
     get_logs,
     get_memory,
+    get_previewable_file,
     monitor_chat,
     monitor_resume,
     monitor_stream,
@@ -440,3 +441,97 @@ def test_verify_monitor_auth_rejects_wrong_password(project_with_api_key_auth):
     with pytest.raises(HTTPException) as exc_info:
         verify_monitor_auth(creds)
     assert exc_info.value.status_code == 401
+
+
+# --- GET /api/files/{file_path} — inline media preview for tool-generated images/audio/video ---
+
+
+def test_get_previewable_file_serves_an_allowed_image(project):
+    (project / "generated_images").mkdir()
+    (project / "generated_images" / "post.png").write_bytes(b"\x89PNG fake but real enough bytes")
+
+    client = TestClient(monitor.app)
+    response = client.get("/api/files/generated_images/post.png")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content == b"\x89PNG fake but real enough bytes"
+    # No forced download — an <img> tag needs this served inline, not as an attachment.
+    assert "attachment" not in response.headers.get("content-disposition", "")
+
+
+def test_get_previewable_file_rejects_path_traversal_outside_project(project):
+    """`project` IS `tmp_path` (the fixture just returns it), so the sibling directory used here
+    is genuinely outside the project root, not just a different-looking path inside it. Called
+    directly rather than through the HTTP route: httpx/Starlette normalize `..` out of a URL
+    before routing ever sees it, so a real `client.get("/api/files/../x")` never reaches this
+    code at all — that's a second layer of defense, not a substitute for verifying the
+    containment check itself actually rejects a literal `..` argument."""
+    outside_dir = project.parent / "sibling_outside_project"
+    outside_dir.mkdir()
+    (outside_dir / "secret.png").write_bytes(b"should never be servable")
+
+    with pytest.raises(IntaGrinError) as exc_info:
+        get_previewable_file(f"../{outside_dir.name}/secret.png")
+    assert exc_info.value.code == "IG-SRV-004"
+
+
+def test_get_previewable_file_rejects_an_absolute_path_argument(project):
+    """Path's own `/` operator discards the left operand entirely when the right operand is
+    absolute (`Path("/a") / "/b" == Path("/b")`) — a naive `project_dir / file_path` join would
+    silently serve ANY absolute path handed to it, bypassing containment entirely. Called
+    directly (not through the HTTP route) since it's ambiguous whether a real URL can even
+    encode a leading slash into this path param — this exercises the Python-level join gotcha
+    itself, independent of that."""
+    outside_dir = project.parent / "sibling_outside_project_2"
+    outside_dir.mkdir()
+    outside = outside_dir / "secret.png"
+    outside.write_bytes(b"should never be servable")
+
+    with pytest.raises(IntaGrinError) as exc_info:
+        get_previewable_file(str(outside))
+    assert exc_info.value.code == "IG-SRV-004"
+
+
+def test_get_previewable_file_rejects_a_disallowed_extension(project):
+    """Existing, inside the project, but not a previewable media type — e.g. this must never
+    become a way to read ai.yaml/.env/source files inline, even though an authenticated
+    dashboard user could already read them via the Architect chat's read_file tool."""
+    (project / ".env").write_text("SECRET_KEY=doNotServeThis")
+
+    client = TestClient(monitor.app)
+    response = client.get("/api/files/.env")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "IG-SRV-004"
+
+
+def test_get_previewable_file_rejects_a_missing_file(project):
+    client = TestClient(monitor.app)
+    response = client.get("/api/files/generated_images/does_not_exist.png")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "IG-SRV-004"
+
+
+def test_get_previewable_file_rejects_a_file_over_the_size_limit(project, monkeypatch):
+    monkeypatch.setattr(monitor, "_MAX_PREVIEW_FILE_BYTES", 10)
+    (project / "big.png").write_bytes(b"x" * 11)
+
+    client = TestClient(monitor.app)
+    response = client.get("/api/files/big.png")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "IG-SRV-004"
+
+
+def test_get_previewable_file_requires_auth_when_configured(project_with_api_key_auth):
+    (project_with_api_key_auth / "post.png").write_bytes(b"fake png bytes")
+    client = TestClient(monitor.app)
+
+    unauthenticated = client.get("/api/files/post.png")
+    assert unauthenticated.status_code == 401
+
+    authenticated = client.get("/api/files/post.png", auth=("admin", "s3cr3t"))
+    assert authenticated.status_code == 200
+    assert authenticated.content == b"fake png bytes"

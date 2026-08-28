@@ -250,6 +250,68 @@
             return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ring-1 ring-inset ${colors[color]}`}>{children}</span>;
         };
 
+        // Mirrors _PREVIEWABLE_MEDIA_TYPES in server/monitor.py — a rendering hint only (which
+        // extensions are worth trying to preview inline). The real allowlist enforcement lives
+        // server-side in GET /api/files; a mismatch here just means a preview attempt either
+        // fails gracefully (MediaPreview's onError below) or is missed, never a security issue.
+        const MEDIA_EXTENSION_KIND = {
+            png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image', svg: 'image',
+            mp3: 'audio', wav: 'audio', ogg: 'audio', m4a: 'audio',
+            mp4: 'video', webm: 'video', mov: 'video',
+        };
+        const MEDIA_PATH_RE = /[\w.\-\/]+\.(png|jpe?g|gif|webp|svg|mp3|wav|ogg|m4a|mp4|webm|mov)\b/gi;
+
+        const previewFileUrl = (relPath) =>
+            '/api/files/' + relPath.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+
+        // Scans arbitrary text — a tool call's raw JSON arguments, or a tool result's content
+        // (which may itself be JSON, e.g. generate_image's return value, or plain prose that
+        // just mentions a path, e.g. review_content's own "Image file: generated_images/x.png")
+        // — for anything that looks like a path to previewable media. Deduplicated by path.
+        const findMediaPreviews = (text) => {
+            if (!text || typeof text !== 'string') return [];
+            const found = new Map();
+            MEDIA_PATH_RE.lastIndex = 0;
+            let m;
+            while ((m = MEDIA_PATH_RE.exec(text)) !== null) {
+                const kind = MEDIA_EXTENSION_KIND[m[1].toLowerCase()];
+                if (kind && !found.has(m[0])) found.set(m[0], kind);
+            }
+            return [...found.entries()].map(([path, kind]) => ({ path, kind }));
+        };
+
+        const MediaPreview = ({ path, kind }) => {
+            const [failed, setFailed] = useState(false);
+            if (failed) return null;
+            const src = previewFileUrl(path);
+            const onError = () => setFailed(true);
+            if (kind === 'image') {
+                return <img src={src} alt={path} onError={onError}
+                    className="max-w-full max-h-64 rounded-lg border border-border mt-2 object-contain" />;
+            }
+            if (kind === 'audio') {
+                return <audio controls src={src} onError={onError} className="w-full mt-2" />;
+            }
+            if (kind === 'video') {
+                return <video controls src={src} onError={onError}
+                    className="max-w-full max-h-64 rounded-lg border border-border mt-2" />;
+            }
+            return null;
+        };
+
+        // Drop-in addition below any raw text/JSON display — never a replacement for it, so
+        // existing debug views (the raw tool_call arguments, the raw tool result text) still
+        // show exactly what they always have.
+        const MediaPreviews = ({ text }) => {
+            const previews = findMediaPreviews(text);
+            if (previews.length === 0) return null;
+            return (
+                <div className="flex flex-col gap-2">
+                    {previews.map(p => <MediaPreview key={p.path} path={p.path} kind={p.kind} />)}
+                </div>
+            );
+        };
+
         const NavBar = ({ onSync, onSyncBlueprint, mainTab, setMainTab, theme, onToggleTheme }) => (
             <header className="h-16 border-b border-border bg-surface/50 backdrop-blur-md flex items-center justify-between px-6 shrink-0 z-10 relative">
                 <div className="flex items-center gap-6">
@@ -382,6 +444,7 @@
                                                                 <span className="text-xs font-medium text-neutral-300">Action: {tc.function.name}</span>
                                                             </div>
                                                             <code className="text-[11px] text-neutral-400 bg-background p-1.5 rounded break-all">{tc.function.arguments}</code>
+                                                            <MediaPreviews text={tc.function.arguments} />
                                                         </div>
                                                     ))}
                                                 </div>
@@ -399,6 +462,7 @@
                                                         {isError ? `✗ Failed: ${msg.name}` : `Result from ${msg.name}`}
                                                     </span>
                                                     <code className={`text-xs break-words ${isError ? 'text-red-200/90' : 'text-amber-200/80'}`}>{(msg.content || '').substring(0, 500)}{msg.content?.length > 500 ? '...' : ''}</code>
+                                                    {!isError && <MediaPreviews text={msg.content} />}
                                                 </div>
                                             </div>
                                         );
@@ -748,9 +812,32 @@
                                         <span className="text-lg">⚠️</span>
                                         <h4 className="text-yellow-400 font-bold text-sm tracking-wide uppercase">Approval Required</h4>
                                     </div>
-                                    <p className="text-sm text-neutral-300 mb-4">
-                                        The agent is requesting permission to execute <span className="font-mono text-yellow-300 bg-yellow-900/50 px-1 rounded">{sessions.find(s => s.session_id === activeSessionId).state._pending_approval.name || sessions.find(s => s.session_id === activeSessionId).state._pending_approval.tool}</span>.
-                                    </p>
+                                    {(() => {
+                                        const pending = sessions.find(s => s.session_id === activeSessionId).state._pending_approval;
+                                        const toolName = pending.name || pending.tool;
+                                        const argEntries = Object.entries(pending.args || {});
+                                        return (
+                                            <>
+                                                <p className="text-sm text-neutral-300 mb-2">
+                                                    The agent is requesting permission to execute <span className="font-mono text-yellow-300 bg-yellow-900/50 px-1 rounded">{toolName}</span>.
+                                                </p>
+                                                {argEntries.length > 0 && (
+                                                    <div className="mb-4 space-y-2 bg-black/20 rounded-lg p-3 border border-yellow-500/10">
+                                                        {argEntries.map(([key, value]) => {
+                                                            const displayValue = typeof value === 'string' ? value : JSON.stringify(value);
+                                                            return (
+                                                                <div key={key} className="text-xs">
+                                                                    <span className="text-yellow-200/70 font-mono">{key}:</span>{' '}
+                                                                    <span className="text-neutral-200 break-all">{displayValue}</span>
+                                                                    <MediaPreviews text={displayValue} />
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                )}
+                                            </>
+                                        );
+                                    })()}
                                     <div className="flex gap-3">
                                         <button
                                             className="flex-1 py-2 bg-green-600/90 hover:bg-green-500 text-white font-bold rounded shadow transition-colors"

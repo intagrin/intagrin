@@ -21,7 +21,30 @@ dashboard has nothing to query either, so its Approve/Deny button never appears 
 advises (never fails) when it finds a `requires_approval`/`required_approvers` tool alongside a
 non-persistent `memory.type`.
 
-## 2. Async Webhook Notifications
+## 2. Previewing Generated Media in Monitor
+
+If a `requires_approval` tool's arguments (or a regular tool's own result) reference a generated
+image, audio, or video file, `inta monitor`'s Playground renders it inline — the Approval card, a
+tool-call bubble, and a tool-result bubble all detect a path ending in a recognized media
+extension (`.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.svg` for images, `.mp3`/`.wav`/`.ogg`/`.m4a` for
+audio, `.mp4`/`.webm`/`.mov` for video) and show it as a real `<img>`/`<audio>`/`<video>` element,
+alongside — never instead of — the raw argument/result text. A tool doesn't need to do anything
+special for this: return the file's path relative to the project root, exactly as you already
+would.
+
+```python
+def review_content(caption: str, hashtags: list[str], image_path: str) -> str:
+    """image_path: e.g. "generated_images/post_42.png", relative to the project root."""
+    ...
+```
+
+This is served by `GET /api/files/{path}` (behind the same `verify_monitor_auth` as every other
+Monitor endpoint), which only ever serves a fixed allowlist of media extensions from inside the
+project directory — never a general file browser (the Architect chat's `read_file` tool already
+covers arbitrary project files for an authenticated dashboard user) and never anything outside
+`ai.yaml`'s own project root, regardless of a path containing `..` or being absolute.
+
+## 3. Async Webhook Notifications
 If your agents are running in background cron jobs, you need a way to know they are waiting. 
 In `ai.yaml`:
 ```yaml
@@ -31,7 +54,7 @@ server:
 ```
 IntaGrin asynchronously POSTs the tool payload to the configured webhook, adding an `Authorization: Bearer <secret>` header when configured. Your webhook receiver can present an approval UI and call `/resume` with the reviewer decision.
 
-## 3. The Resume API
+## 4. The Resume API
 To resume the paused agent, your frontend (or Slack bot) hits the `/resume` REST API.
 
 ```json
@@ -51,11 +74,11 @@ content with the real result in place — it does not append a second response t
 call. This matters for providers (OpenAI in particular) that reject a message history where one
 tool call is answered twice.
 
-## 4. One-Time Execution Exemptions
+## 5. One-Time Execution Exemptions
 When a human approves a tool via `/resume`, IntaGrin grants a **one-time execution exemption** for that exact paused call — scoped to its `tool_call_id`, not just the tool's name. If an agent has two concurrent calls to the same `requires_approval` tool in one turn (e.g. two `refund_customer` calls for two different orders), approving one never lets the *other*, unapproved one ride along just because they share a name — each call needs its own approval.
 Once the call runs, its exemption is removed from `_approved_tool_calls`. This prevents the LLM from re-triggering the same approved call again later in the same session without a fresh approval.
 
-## 5. Dynamic Approval from Inside a Tool
+## 6. Dynamic Approval from Inside a Tool
 
 `requires_approval: true` gates every call to a tool. Sometimes only *some* calls need a human —
 the rest should just run. Raise `AwaitingHumanInput` from inside the tool's own Python body to
@@ -85,7 +108,7 @@ them, otherwise the original `args`) — it is not a continuation that picks up 
 non-idempotent side effects (charges, writes, external calls) before the point where you might
 raise `AwaitingHumanInput`.
 
-## 6. Multi-Approver Chains
+## 7. Multi-Approver Chains
 
 By default a single `/resume` call with `approved: true` fully resolves a pending approval — one
 approver is enough. For higher-risk tools, require several distinct approvers to each sign off

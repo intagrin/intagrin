@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -238,6 +238,73 @@ def get_docs():
     except Exception as e:
         Tracer.log_error(f"Docs API Error: {e}")
         return [{"filename": "Error.md", "content": f"# Error Loading Docs\n\n{e!s}"}]
+
+
+# Extension allowlist for GET /api/files/{path} below — deliberately narrow. This endpoint
+# exists to let the dashboard embed a tool's own generated media (an approval card's image, a
+# generate_image result) directly in <img>/<audio>/<video> tags, not to serve arbitrary project
+# files inline; unlisted extensions (.py, .yaml, .env, ...) are rejected outright regardless of
+# how harmless a given file might actually be, so this stays a fixed, auditable allowlist rather
+# than a denylist that has to keep up with every new sensitive extension a project might add.
+_PREVIEWABLE_MEDIA_TYPES: dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".m4a": "audio/mp4",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+}
+# Generous for a generated image or a short generated clip; bounds how much any one preview
+# request can make the server read/stream, independent of the extension allowlist above.
+_MAX_PREVIEW_FILE_BYTES = 50 * 1024 * 1024
+
+
+@app.get("/api/files/{file_path:path}", dependencies=[Depends(verify_monitor_auth)])
+def get_previewable_file(file_path: str):
+    """Serves one project-relative file for inline media preview — an Approval card's generated
+    image, or a generate_image-style tool's own result — never a general file browser (the
+    Architect chat's read_file tool already covers arbitrary project files for an authenticated
+    dashboard user, which is the same auth boundary this sits behind). Bounded to project_dir
+    regardless of that broader trust level: `.resolve()` collapses `..` segments *and* an
+    accidentally-absolute `file_path` (Path's own `/` operator discards the left side entirely
+    when the right side is absolute, so this is not just a `..` check) before confirming the
+    result is still inside project_dir, exactly the same containment check /api/architect's own
+    read_file tool uses above."""
+    project_dir = Path.cwd()
+    resolved = (project_dir / file_path).resolve()
+    project_root = project_dir.resolve()
+
+    if project_root not in resolved.parents and resolved != project_root:
+        raise IntaGrinError("IG-SRV-004", f"'{file_path}' is outside the project directory.")
+
+    media_type = _PREVIEWABLE_MEDIA_TYPES.get(resolved.suffix.lower())
+    if media_type is None:
+        raise IntaGrinError(
+            "IG-SRV-004",
+            f"'{file_path}' has no previewable media extension "
+            f"({resolved.suffix or 'none'}) — supported: {', '.join(sorted(_PREVIEWABLE_MEDIA_TYPES))}.",
+        )
+
+    if not resolved.is_file():
+        raise IntaGrinError("IG-SRV-004", f"'{file_path}' does not exist.")
+
+    if resolved.stat().st_size > _MAX_PREVIEW_FILE_BYTES:
+        raise IntaGrinError(
+            "IG-SRV-004",
+            f"'{file_path}' is {resolved.stat().st_size} bytes, over the "
+            f"{_MAX_PREVIEW_FILE_BYTES} byte preview limit.",
+        )
+
+    # No `filename=` — that would set Content-Disposition: attachment and force a download
+    # instead of the inline rendering an <img>/<audio>/<video> tag needs.
+    return FileResponse(resolved, media_type=media_type)
 
 
 class SyncGraphRequest(BaseModel):

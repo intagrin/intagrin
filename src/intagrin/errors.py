@@ -280,6 +280,20 @@ _SPECS: list[ErrorSpec] = [
         ),
         default_http_status=400,
     ),
+    ErrorSpec(
+        code="IG-SRV-004",
+        category="Server & API",
+        title="Project file cannot be previewed",
+        causes=(
+            "`GET /api/files/{path}` (used to preview a tool's generated image/audio/video, "
+            "e.g. in the Approval card or a tool-call/result bubble) was asked for a path "
+            "outside the project directory, a file extension it doesn't recognize as previewable "
+            "media, a file that doesn't exist, or a file larger than its preview size limit. This "
+            "endpoint is intentionally narrower than the Architect chat's own `read_file` tool — "
+            "it only ever serves a fixed allowlist of media types, inline, for display."
+        ),
+        default_http_status=404,
+    ),
 ]
 
 ERRORS: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}
