@@ -605,6 +605,11 @@
         const Playground = ({ fetchMemory, messages, setMessages, streamingAgent, setStreamingAgent, sessions, activeSessionId, setActiveSessionId, contextWindow }) => {
             const [input, setInput] = useState('');
             const [loading, setLoading] = useState(false);
+            // Which of Approve/Reject is currently in flight, if either — `loading` alone can't
+            // tell the two buttons apart (it's shared with the message-send flow too), so without
+            // this a rapid double-click on either button had no visual feedback and nothing
+            // stopped a second /api/resume firing before the first one returned.
+            const [approvalAction, setApprovalAction] = useState(null);
             // The Thermodynamic HUD used to float absolutely over the message list (top-16
             // right-4) — with min-w-[250px] sitting right where right-aligned user bubbles
             // appear near the top of a short conversation, it visibly covered them. Now it's a
@@ -812,7 +817,7 @@
                                 ))}
                             </React.Fragment>
                         )}
-                        {loading && (
+                        {loading && !approvalAction && (
                             <div className="flex justify-start">
                                 <div className="bg-surface border border-primary/30 text-neutral-300 rounded-xl p-4 shadow-[0_4px_20px_-5px_rgba(99,102,241,0.15)] flex flex-col gap-3 max-w-[85%] relative overflow-hidden">
                                     <div className="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-primary to-transparent animate-[pulse_2s_ease-in-out_infinite]"></div>
@@ -828,8 +833,12 @@
                             </div>
                         )}
                     </div>
-                        {/* Playground Approval UI */}
-                        {!loading && sessions?.find(s => s.session_id === activeSessionId)?.state?._pending_approval && (
+                        {/* Playground Approval UI. Stays mounted through its own in-flight
+                            /api/resume request (loading is true but approvalAction names which
+                            button caused it) so the disabled/spinner button state below is
+                            actually visible instead of being replaced by the generic "Glass Box
+                            Pipeline" indicator the instant the click sets loading=true. */}
+                        {(!loading || approvalAction) && sessions?.find(s => s.session_id === activeSessionId)?.state?._pending_approval && (
                             <div className="flex justify-start mt-4 mb-4">
                                 <div className="max-w-[80%] rounded-xl p-4 border border-yellow-500/30 bg-yellow-500/10 shadow-lg w-full">
                                     <div className="flex items-center gap-2 mb-2">
@@ -864,8 +873,10 @@
                                     })()}
                                     <div className="flex gap-3">
                                         <button
-                                            className="flex-1 py-2 bg-green-600/90 hover:bg-green-500 text-white font-bold rounded shadow transition-colors"
+                                            disabled={loading}
+                                            className="flex-1 py-2.5 px-4 flex items-center justify-center gap-2 bg-gradient-to-b from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 disabled:from-neutral-600 disabled:to-neutral-700 disabled:cursor-not-allowed disabled:opacity-60 text-white font-semibold rounded-lg shadow-lg shadow-emerald-950/40 hover:shadow-emerald-500/30 transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]"
                                             onClick={async () => {
+                                                setApprovalAction('approve');
                                                 setLoading(true);
                                                 try {
                                                     const res = await fetch('/api/resume', {
@@ -887,13 +898,26 @@
                                                     }
                                                 } finally {
                                                     setLoading(false);
+                                                    setApprovalAction(null);
                                                     fetchMemory();
                                                 }
                                             }}
-                                        >Approve</button>
+                                        >
+                                            {approvalAction === 'approve' ? (
+                                                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                                                </svg>
+                                            ) : (
+                                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                                            )}
+                                            Approve
+                                        </button>
                                         <button
-                                            className="flex-1 py-2 bg-red-600/90 hover:bg-red-500 text-white font-bold rounded shadow transition-colors"
+                                            disabled={loading}
+                                            className="flex-1 py-2.5 px-4 flex items-center justify-center gap-2 bg-gradient-to-b from-red-500 to-red-600 hover:from-red-400 hover:to-red-500 disabled:from-neutral-600 disabled:to-neutral-700 disabled:cursor-not-allowed disabled:opacity-60 text-white font-semibold rounded-lg shadow-lg shadow-red-950/40 hover:shadow-red-500/30 transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]"
                                             onClick={async () => {
+                                                setApprovalAction('reject');
                                                 setLoading(true);
                                                 try {
                                                     const res = await fetch('/api/resume', {
@@ -908,10 +932,21 @@
                                                     }
                                                 } finally {
                                                     setLoading(false);
+                                                    setApprovalAction(null);
                                                     fetchMemory();
                                                 }
                                             }}
-                                        >Reject</button>
+                                        >
+                                            {approvalAction === 'reject' ? (
+                                                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                                                </svg>
+                                            ) : (
+                                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                                            )}
+                                            Reject
+                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -1603,14 +1638,28 @@
                             .join(' ');
                     };
 
+                    let yOffset = 200;
+                    let xOffset = 50;
+
+                    // The User node used to sit at a hardcoded x:300 regardless of how many
+                    // agents there are or how wide their row ends up — centered only by
+                    // coincidence for exactly 2 agents, visibly off-center for any other count
+                    // (an empty swarm, one agent, four-plus). Center it over the actual agent
+                    // row's span instead, computed the same way the row itself is laid out below
+                    // (xOffset + index*280 per agent, each box 240 wide).
+                    const agentCount = data.agents ? Object.keys(data.agents).length : 0;
+                    const agentRowWidth = agentCount > 0 ? (agentCount - 1) * 280 + 240 : 240;
+                    const userNodeWidth = 220;
+                    const userX = xOffset + agentRowWidth / 2 - userNodeWidth / 2;
+
                     newNodes.push({
                         id: 'user',
                         type: 'default',
                         sourcePosition: 'bottom',
                         targetPosition: 'top',
                         data: { label: <div dangerouslySetInnerHTML={{ __html: createHtmlLabel('👤', 'User', 'Input Entry') }} /> },
-                        position: { x: 300, y: 50 },
-                        style: { background: bgColor, width: 220, padding: '12px', border: `1px solid ${borderColor}`, borderRadius: '12px' }
+                        position: { x: userX, y: 50 },
+                        style: { background: bgColor, width: userNodeWidth, padding: '12px', border: `1px solid ${borderColor}`, borderRadius: '12px' }
                     });
 
                     if (data.default_agent) {
@@ -1622,9 +1671,6 @@
                             style: { stroke: '#6366f1', strokeWidth: 2 }
                         });
                     }
-
-                    let yOffset = 200;
-                    let xOffset = 50;
 
                     if (data.agents) {
                         Object.entries(data.agents).forEach(([agentName, agentData], index) => {
@@ -1659,7 +1705,10 @@
                                         sourcePosition: 'bottom',
                                         targetPosition: 'top',
                                         data: { label: <div dangerouslySetInnerHTML={{ __html: createHtmlLabel('🔧', formatTitle(t.name), 'Tool / MCP') }} /> },
-                                        position: { x: xOffset + (index * 280) + (tIdx * 10) + 10, y: yOffset + 140 + (tIdx * 80) },
+                                        // Same width as the agent box (240) — tIdx 0 sits flush under its
+                                        // parent instead of shifted +10px right, and only tools after the
+                                        // first cascade further right/down for the stacked-card look.
+                                        position: { x: xOffset + (index * 280) + (tIdx * 10), y: yOffset + 140 + (tIdx * 80) },
                                         style: { background: bgColor, width: 240, padding: '10px', border: `1px solid ${borderColor}`, borderRadius: '8px' }
                                     });
                                     newEdges.push({

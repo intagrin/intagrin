@@ -881,6 +881,134 @@ test('Approving a paused tool call shows what /resume actually returned, not a b
   }
 });
 
+test('Approve/Reject buttons disable and show a spinner while /resume is in flight, and stay put', async () => {
+  // Regression test for a real bug found while redesigning these buttons: the approval card was
+  // gated on `!loading`, but clicking Approve/Reject sets `loading=true` in the very same click
+  // handler that sets it, so the card (buttons included) unmounted instantly and was replaced by
+  // the unrelated generic "Glass Box Pipeline" chat-loading indicator — the disabled/spinner
+  // button state could never actually be seen, and a fast double-click had no visible disabled
+  // state to prevent it either. Seeded fresh, same reasoning as the test above (the 10-most-
+  // recent /api/memory window).
+  seedSession(projectDir, APPROVAL_SESSION_ID, APPROVAL_SESSION_MESSAGES, {
+    _metrics: { total_tokens: 5, total_cost: 0.0001 },
+    _pending_approval: {
+      tool: 'book_hotel',
+      args: {},
+      status: 'awaiting_approval',
+      tool_call_id: 'call_1',
+    },
+  });
+
+  const page = await browser.newPage();
+  try {
+    let resumeRequestCount = 0;
+    let releaseResume;
+    const resumeHeld = new Promise((resolve) => {
+      releaseResume = resolve;
+    });
+
+    await page.setRequestInterception(true);
+    page.on('request', async (req) => {
+      if (req.url().endsWith('/api/resume')) {
+        resumeRequestCount += 1;
+        await resumeHeld;
+        req.respond({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            response: 'Approved.',
+            active_agent: 'planner',
+            status: 'completed',
+            pending_action: null,
+            queued_approvals: 0,
+          }),
+        });
+      } else {
+        req.continue();
+      }
+    });
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(
+      () => document.body.innerText.toUpperCase().includes('ACTIVE SESSION'),
+      { timeout: 15000 }
+    );
+
+    // Open the session-selector dropdown (click the button showing the currently active session
+    // id) before its search input exists at all.
+    const opened = await page.evaluate((currentId) => {
+      const btn = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent.includes(currentId)
+      );
+      if (!btn) return false;
+      btn.click();
+      return true;
+    }, SEEDED_SESSION_ID);
+    assert.ok(opened, 'expected a session-selector button showing the active session id');
+
+    await page.waitForSelector('input[placeholder="Search sessions..."]', { timeout: 5000 });
+    await page.type('input[placeholder="Search sessions..."]', APPROVAL_SESSION_ID);
+    await page.waitForFunction(
+      (id) => document.body.innerText.includes(id),
+      { timeout: 5000 },
+      APPROVAL_SESSION_ID
+    );
+    const selected = await page.evaluate((id) => {
+      const row = [...document.querySelectorAll('button')].find((b) => b.textContent.includes(id));
+      if (!row) return false;
+      row.click();
+      return true;
+    }, APPROVAL_SESSION_ID);
+    assert.ok(selected, 'expected a clickable row for the approval-demo session');
+
+    await page.waitForFunction(() => document.body.innerText.toUpperCase().includes('APPROVAL REQUIRED'), {
+      timeout: 10000,
+    });
+
+    const approved = await page.evaluate(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Approve');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    });
+    assert.ok(approved, 'expected an Approve button once a pending approval is showing');
+
+    // Give the click handler's state updates (and the request reaching the interceptor) a moment
+    // to land before asserting on the disabled state it should now be showing.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const midFlight = await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll('button')].filter((b) =>
+        ['Approve', 'Reject'].includes(b.textContent.trim())
+      );
+      return {
+        stillMounted: buttons.length === 2,
+        bothDisabled: buttons.every((b) => b.disabled),
+        approveHasSpinner: !!buttons
+          .find((b) => b.textContent.trim() === 'Approve')
+          ?.querySelector('svg.animate-spin'),
+      };
+    });
+    assert.equal(midFlight.stillMounted, true, 'approval card must stay mounted while its own request is in flight');
+    assert.equal(midFlight.bothDisabled, true, 'both buttons must be disabled while a resume request is in flight');
+    assert.equal(midFlight.approveHasSpinner, true, 'the clicked Approve button must show a spinner while in flight');
+
+    // A second click while disabled must be a no-op — React's disabled attribute blocks the
+    // click, so this proves no second /api/resume fires from an impatient double-click.
+    await page.evaluate(() => {
+      const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Approve');
+      btn?.click();
+    });
+
+    releaseResume();
+    await page.waitForFunction(() => document.body.innerText.includes('Approved.'), { timeout: 10000 });
+
+    assert.equal(resumeRequestCount, 1, 'exactly one /api/resume request must fire despite the second click');
+  } finally {
+    await page.close();
+  }
+});
+
 test('Approval card renders tool arguments and previews a generated image inline', async () => {
   // Reproduces the actual feature request: an Instagram-content-creator style agent's
   // requires_approval tool pauses with args like {caption, hashtags, image_path} — before this,
@@ -1255,5 +1383,78 @@ test('Architect chat auto-scrolls to the bottom when a long conversation is expa
   } finally {
     await page.close();
     await context.close();
+  }
+});
+
+test('User node is centered above the agent row, not pinned to a hardcoded x', async () => {
+  // Regression test: the User node used to sit at a hardcoded x:300 regardless of how many
+  // agents exist or how wide their row ends up — only roughly centered by coincidence for
+  // exactly 2-3 agents, visibly off-center otherwise. Uses its own isolated project + monitor
+  // instance (4 agents, deliberately not the shared fixture's 3) so the old bug's ~150px
+  // discrepancy can't be masked by a tolerance loose enough to hide a smaller one.
+  const demoDir = scaffoldProject('alignment-demo');
+  fs.writeFileSync(
+    path.join(demoDir, 'ai.yaml'),
+    `version: "1.0"
+name: "alignment-demo"
+default_agent: "triage"
+model:
+  primary: "mock/model"
+memory:
+  type: "sqlite"
+agents:
+  triage:
+    description: "Routes."
+  billing:
+    description: "Bills."
+  technical:
+    description: "Fixes."
+  diagnostics:
+    description: "Diagnoses."
+`
+  );
+  const port = 8421;
+  let proc;
+  try {
+    proc = await startMonitor(demoDir, port);
+    const page = await browser.newPage();
+    try {
+      await page.goto(`http://localhost:${port}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('.react-flow__node[data-id="user"]', { timeout: 15000 });
+      await page.waitForSelector('.react-flow__node[data-id="triage"]', { timeout: 15000 });
+      await new Promise((r) => setTimeout(r, 800)); // let ReactFlow finish layout/fit-view
+
+      const alignment = await page.evaluate(() => {
+        const agentIds = ['triage', 'billing', 'technical', 'diagnostics'];
+        const agentRects = agentIds
+          .map((id) => document.querySelector(`.react-flow__node[data-id="${id}"]`))
+          .filter(Boolean)
+          .map((n) => n.getBoundingClientRect());
+        const userNode = document.querySelector('.react-flow__node[data-id="user"]');
+        if (!userNode || agentRects.length !== agentIds.length) {
+          return { found: false, agentCount: agentRects.length };
+        }
+        const rowLeft = Math.min(...agentRects.map((r) => r.left));
+        const rowRight = Math.max(...agentRects.map((r) => r.right));
+        const rowCenter = (rowLeft + rowRight) / 2;
+        const userRect = userNode.getBoundingClientRect();
+        const userCenter = (userRect.left + userRect.right) / 2;
+        return { found: true, rowCenter, userCenter, diff: Math.abs(rowCenter - userCenter) };
+      });
+
+      assert.ok(
+        alignment.found,
+        `expected the User node and all 4 agent nodes to be present, got agentCount=${alignment.agentCount}`
+      );
+      assert.ok(
+        alignment.diff < 20,
+        `expected the User node centered above the agent row (within 20px), got row center=${alignment.rowCenter}, user center=${alignment.userCenter}, diff=${alignment.diff}`
+      );
+    } finally {
+      await page.close();
+    }
+  } finally {
+    if (proc) stopMonitor(proc);
+    cleanupProject(demoDir);
   }
 });
