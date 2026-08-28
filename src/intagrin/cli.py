@@ -1420,19 +1420,86 @@ def _placeholder_prompt(description: str) -> str:
     return f"You are {description}.\n"
 
 
-def _draft_agent_system_prompt(
+def _blueprint_hash(blueprint_content: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(blueprint_content.encode()).hexdigest()[:16]
+
+
+def _split_blueprint_marker(text: str) -> tuple[str, str | None]:
+    """Splits a previously-scaffolded prompt file's body from its trailing
+    `intagrin:blueprint-hash` marker comment (see _stamp_blueprint_marker). Returns
+    (body_without_marker, hash) if the marker is present, else (text, None) — a file with no
+    marker was never machine-drafted, or had its marker deliberately removed, so it's treated as
+    hand-owned and is never reconsidered for an automatic update."""
+    import re
+
+    match = re.search(
+        r"\n*\{#\s*intagrin:blueprint-hash\s+([0-9a-f]+)[^#]*#\}\s*\Z", text
+    )
+    if not match:
+        return text, None
+    return text[: match.start()], match.group(1)
+
+
+def _stamp_blueprint_marker(body: str, blueprint_hash: str) -> str:
+    """Appends the machine-drafted marker read back by _split_blueprint_marker, recording which
+    version of blueprint.md this prompt was drafted from. Jinja2 treats `{# ... #}` as a comment,
+    so it's inert in the rendered prompt — but visible enough that a curious user understands why
+    a future `inta compile` might offer to update this file, and how to opt out (delete the line;
+    the file is then treated as hand-written and never touched again)."""
+    body = body.rstrip("\n")
+    return (
+        f"{body}\n\n"
+        f"{{# intagrin:blueprint-hash {blueprint_hash} — auto-managed by `inta compile`; delete "
+        f"this line to edit this prompt by hand and stop auto-updates #}}\n"
+    )
+
+
+def _confirm_prompt_update(prompt_path: Path, project_dir: Path, current_body: str, candidate: str) -> bool:
+    """Shows the same green/red unified diff + confirm prompt already used for ai.yaml changes
+    above, so a blueprint-driven prompt rewrite is always reviewed before it's applied — never
+    silently overwritten just because the blueprint moved."""
+    import difflib
+
+    from rich.prompt import Confirm
+
+    rel = prompt_path.relative_to(project_dir)
+    console.print(
+        f"\n[bold yellow]blueprint.md changed since {rel} was last drafted. Proposed update:[/bold yellow]"
+    )
+    diff = difflib.unified_diff(
+        current_body.splitlines(),
+        candidate.splitlines(),
+        fromfile=f"current_{rel.name}",
+        tofile=f"redrafted_{rel.name}",
+        lineterm="",
+    )
+    for line in diff:
+        if line.startswith("+"):
+            console.print(f"[green]{line}[/green]")
+        elif line.startswith("-"):
+            console.print(f"[red]{line}[/red]")
+        else:
+            console.print(line)
+    return Confirm.ask(f"\nUpdate {rel} to match?")
+
+
+def _draft_agent_system_prompt_or_none(
     agent_name: str, agent_cfg, blueprint_content: str, compile_model: str
-) -> str:
+) -> str | None:
     """Asks the same model that just compiled the blueprint to draft a real system prompt for one
     agent — persona, responsibilities, tool-usage guidance, when to hand off — instead of the
     one-line `f"You are {description}."` placeholder this used to always write. The blueprint is
     already sitting right there with everything a prompt engineer would actually want to know
     about this agent's place in the larger system; reusing it costs nothing extra to collect.
 
-    Best-effort: any failure here (network, malformed response, no key for a *different* provider
-    than the one already validated for the compile call itself) falls back to the old one-liner
-    rather than ever blocking or breaking a compile over prompt quality — the file still gets
-    written, just worse, exactly like today until someone edits it by hand."""
+    Returns None (never raises) on any failure — network, malformed response, no key for a
+    *different* provider than the one already validated for the compile call itself. Callers that
+    just want text unconditionally should use _draft_agent_system_prompt instead; this variant
+    exists so _scaffold_referenced_files can tell "drafted successfully" apart from "fell back to
+    a placeholder" and only stamp the blueprint-hash marker (which invites a future auto-update)
+    on prompts that are actually blueprint-derived."""
     description = getattr(agent_cfg, "description", None) or f"the {agent_name} agent"
     tool_names = [t.name for t in (getattr(agent_cfg, "tools", []) or []) if getattr(t, "name", None)]
     handoff_targets = list(getattr(agent_cfg, "handoffs", []) or [])
@@ -1473,6 +1540,18 @@ def _draft_agent_system_prompt(
     except Exception as e:
         Tracer.log_error(f"Prompt drafting failed for '{agent_name}', using a placeholder: {e}")
 
+    return None
+
+
+def _draft_agent_system_prompt(
+    agent_name: str, agent_cfg, blueprint_content: str, compile_model: str
+) -> str:
+    """Best-effort wrapper around _draft_agent_system_prompt_or_none — always returns text, falling
+    back to the plain placeholder on any failure."""
+    drafted = _draft_agent_system_prompt_or_none(agent_name, agent_cfg, blueprint_content, compile_model)
+    if drafted is not None:
+        return drafted
+    description = getattr(agent_cfg, "description", None) or f"the {agent_name} agent"
     return _placeholder_prompt(description)
 
 
@@ -1481,15 +1560,22 @@ def _scaffold_referenced_files(
     config,
     compile_model: str | None = None,
     blueprint_content: str | None = None,
-) -> list[Path]:
+) -> tuple[list[Path], list[Path]]:
     """Creates prompt files and stub tool functions for anything the compiled config references
-    that doesn't exist yet. Never touches a file that already exists — a re-compile against
-    manually-edited prompts/tools leaves them alone. Prompt files are LLM-drafted (see
-    _draft_agent_system_prompt) when compile_model/blueprint_content are given; falls back to a
-    one-line placeholder otherwise, e.g. if ever called without them."""
+    that doesn't exist yet, and refreshes any prompt file *this command itself drafted* on an
+    earlier run when blueprint.md has changed since (tracked via a trailing
+    `intagrin:blueprint-hash` marker comment — see _stamp_blueprint_marker). A prompt file with no
+    marker was hand-written, or had its marker deliberately removed, and is never touched — the
+    original "never overwrites a file you've edited by hand" guarantee still holds, it's just now
+    precise about which files that applies to. A real change is always shown as a diff and
+    confirmed before being written, exactly like the ai.yaml diff above. Tool stubs are create-only
+    regardless — a redraft could clobber real business logic a human wrote into the stub. Returns
+    (created, updated)."""
     from .config.schema import LocalToolConfig
 
     created: list[Path] = []
+    updated: list[Path] = []
+    blueprint_hash = _blueprint_hash(blueprint_content) if blueprint_content else None
 
     for tool_cfg in getattr(config, "tools", []) or []:
         if isinstance(tool_cfg, LocalToolConfig):
@@ -1501,23 +1587,47 @@ def _scaffold_referenced_files(
             prompt_path = project_dir / prompt_file
             if not prompt_path.exists():
                 prompt_path.parent.mkdir(parents=True, exist_ok=True)
+                drafted = None
                 if compile_model and blueprint_content:
-                    text = _draft_agent_system_prompt(
+                    drafted = _draft_agent_system_prompt_or_none(
                         agent_name, agent_cfg, blueprint_content, compile_model
                     )
+                if drafted is not None:
+                    prompt_path.write_text(_stamp_blueprint_marker(drafted, blueprint_hash))
                 else:
+                    # No drafting attempted, or it failed — a placeholder isn't blueprint-derived,
+                    # so it gets no marker and stays eligible for a real draft on any future compile.
                     description = (
                         getattr(agent_cfg, "description", None) or f"the {agent_name} agent"
                     )
-                    text = _placeholder_prompt(description)
-                prompt_path.write_text(text)
+                    prompt_path.write_text(_placeholder_prompt(description))
                 created.append(prompt_path)
+            elif compile_model and blueprint_content:
+                current_body, marker_hash = _split_blueprint_marker(prompt_path.read_text())
+                if marker_hash is not None and marker_hash != blueprint_hash:
+                    candidate = _draft_agent_system_prompt_or_none(
+                        agent_name, agent_cfg, blueprint_content, compile_model
+                    )
+                    if candidate is None:
+                        # Redraft attempt failed — leave the file and its marker untouched so this
+                        # is retried on the next compile instead of silently giving up.
+                        pass
+                    elif candidate.strip() == current_body.strip():
+                        # Blueprint changed, but nothing about it affected this agent's prompt.
+                        prompt_path.write_text(_stamp_blueprint_marker(current_body, blueprint_hash))
+                    elif _confirm_prompt_update(prompt_path, project_dir, current_body, candidate):
+                        prompt_path.write_text(_stamp_blueprint_marker(candidate, blueprint_hash))
+                        updated.append(prompt_path)
+                    else:
+                        # Declined — keep the existing text, but stamp the current blueprint hash
+                        # so an unchanged blueprint doesn't re-ask the same question every compile.
+                        prompt_path.write_text(_stamp_blueprint_marker(current_body, blueprint_hash))
 
         for tool_cfg in getattr(agent_cfg, "tools", []) or []:
             if isinstance(tool_cfg, LocalToolConfig):
                 created.extend(_ensure_local_tool_stub(project_dir, tool_cfg))
 
-    return created
+    return created, updated
 
 
 @app.command(name="compile")
@@ -1758,12 +1868,16 @@ You MUST conform to this exact JSON Schema for your output. Notice which fields 
             "[bold green]Successfully compiled blueprint into ai.yaml (schema + router syntax validated)![/bold green]"
         )
 
-        scaffolded = _scaffold_referenced_files(
+        created_files, updated_files = _scaffold_referenced_files(
             project_dir, validated_config, compile_model, blueprint_content
         )
-        for path in scaffolded:
+        for path in created_files:
             console.print(
                 f"[green]✓ Scaffolded {path.relative_to(project_dir)}[/green] [dim](review before relying on it)[/dim]"
+            )
+        for path in updated_files:
+            console.print(
+                f"[cyan]↻ Updated {path.relative_to(project_dir)}[/cyan] [dim](redrafted to match the updated blueprint)[/dim]"
             )
 
         console.print("\n[bold cyan]Running `inta verify` on the compiled swarm...[/bold cyan]")

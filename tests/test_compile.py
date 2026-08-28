@@ -330,6 +330,132 @@ def test_compile_command_falls_back_to_a_placeholder_when_prompt_drafting_fails(
     assert Path("prompts/triage.jinja2").read_text() == "You are Routes tickets.\n"
 
 
+def test_compile_command_offers_to_update_a_previously_drafted_prompt_when_blueprint_changes(
+    mock_blueprint, monkeypatch
+):
+    """Once a prompt file carries the intagrin:blueprint-hash marker (i.e. this command drafted
+    it), a later compile against a *changed* blueprint.md must offer to redraft it — diffed and
+    confirmed just like the ai.yaml change above — instead of leaving it stale forever just
+    because the file already exists on disk."""
+    config = dict(VALID_MINIMAL_CONFIG)
+    config["agents"] = {
+        "triage": {"description": "Routes tickets.", "system_prompt_file": "prompts/triage.jinja2"}
+    }
+    draft_calls = []
+
+    def mock_completion(*args, **kwargs):
+        sys_content = kwargs["messages"][0]["content"]
+        if "expert prompt engineer" in sys_content:
+            draft_calls.append(kwargs["messages"][1]["content"])
+            if len(draft_calls) == 1:
+                return _MockResponse("You are the triage agent. Handle incoming tickets.")
+            return _MockResponse("You are the triage agent. Handle tickets and escalate refunds.")
+        return _MockResponse(json.dumps(config))
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", mock_completion)
+
+    result1 = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
+    assert result1.exit_code == 0, result1.stdout
+    prompt_path = Path("prompts/triage.jinja2")
+    first_draft = prompt_path.read_text()
+    assert "Handle incoming tickets" in first_draft
+    assert "intagrin:blueprint-hash" in first_draft
+
+    mock_blueprint.write_text(
+        "# Vision\nCreate a triage agent that also handles refund escalations."
+    )
+
+    result2 = runner.invoke(
+        app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"], input="y\ny\n"
+    )
+    assert result2.exit_code == 0, result2.stdout
+    assert "blueprint.md changed since" in result2.stdout
+    assert "Updated prompts/triage.jinja2" in result2.stdout
+
+    updated_draft = prompt_path.read_text()
+    assert "escalate refunds" in updated_draft
+    assert len(draft_calls) == 2
+
+
+def test_compile_command_declining_a_prompt_update_keeps_the_old_text_but_stops_reasking(
+    mock_blueprint, monkeypatch
+):
+    """Declining the redraft diff must preserve the existing prompt text exactly, but still needs
+    to record that this blueprint version was already reviewed — otherwise every future compile
+    against the same unchanged blueprint would re-ask the identical question forever."""
+    config = dict(VALID_MINIMAL_CONFIG)
+    config["agents"] = {
+        "triage": {"description": "Routes tickets.", "system_prompt_file": "prompts/triage.jinja2"}
+    }
+    draft_calls = []
+
+    def mock_completion(*args, **kwargs):
+        sys_content = kwargs["messages"][0]["content"]
+        if "expert prompt engineer" in sys_content:
+            draft_calls.append(kwargs["messages"][1]["content"])
+            return _MockResponse(f"Drafted version {len(draft_calls)} of the triage prompt.")
+        return _MockResponse(json.dumps(config))
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", mock_completion)
+
+    runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
+    prompt_path = Path("prompts/triage.jinja2")
+    original_draft = prompt_path.read_text()
+
+    mock_blueprint.write_text("# Vision\nCreate a triage agent with a slightly different scope.")
+
+    # "y" accepts the (no-op) ai.yaml diff, "n" declines the offered prompt update.
+    result2 = runner.invoke(
+        app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"], input="y\nn\n"
+    )
+    assert result2.exit_code == 0, result2.stdout
+    assert prompt_path.read_text().splitlines()[0] == original_draft.splitlines()[0]
+    assert len(draft_calls) == 2
+
+    # Recompiling again against the SAME (now-declined) blueprint must not ask a second time.
+    result3 = runner.invoke(
+        app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"], input="y\n"
+    )
+    assert result3.exit_code == 0, result3.stdout
+    assert "blueprint.md changed since" not in result3.stdout
+    assert len(draft_calls) == 2
+
+
+def test_compile_command_skips_redrafting_when_blueprint_is_unchanged(mock_blueprint, monkeypatch):
+    """The common case: recompiling against the exact same blueprint.md must not re-draft (and
+    re-ask about) prompts that have nothing to update — no wasted LLM call, no confirm prompt."""
+    config = dict(VALID_MINIMAL_CONFIG)
+    config["agents"] = {
+        "triage": {"description": "Routes tickets.", "system_prompt_file": "prompts/triage.jinja2"}
+    }
+    draft_calls = []
+
+    def mock_completion(*args, **kwargs):
+        sys_content = kwargs["messages"][0]["content"]
+        if "expert prompt engineer" in sys_content:
+            draft_calls.append(kwargs["messages"][1]["content"])
+            return _MockResponse("You are the triage agent.")
+        return _MockResponse(json.dumps(config))
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", mock_completion)
+
+    runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
+    assert len(draft_calls) == 1
+
+    result2 = runner.invoke(
+        app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"], input="y\n"
+    )
+    assert result2.exit_code == 0, result2.stdout
+    assert len(draft_calls) == 1
+    assert "Updated" not in result2.stdout
+
+
 def test_compile_command_reports_missing_api_key_without_a_raw_traceback(tmp_path, monkeypatch):
     """Regression test: `inta compile` in a fresh directory with no API key configured anywhere
     used to crash with a raw litellm traceback deep in a provider SDK. It must instead fail with
