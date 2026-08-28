@@ -1109,15 +1109,40 @@
                 setRightTab('playground');
             };
 
-            // Architect Chat State
-            const [architectSessions, setArchitectSessions] = useState(() => {
-                const saved = localStorage.getItem('architectSessions');
-                return saved ? JSON.parse(saved) : [{ id: Date.now().toString(), name: 'Session 1', messages: [] }];
-            });
-            const [activeArchSessionId, setActiveArchSessionId] = useState(() => {
-                const saved = localStorage.getItem('activeArchSessionId');
-                return saved || Date.now().toString();
-            });
+            // Architect Chat State — keyed per-project, same reasoning as STUDIO_LAYOUT_PREFIX
+            // above: `inta monitor` defaults to the same port (3000) for every project, so two
+            // differently-named projects opened in the same browser land on the same origin and
+            // previously shared one global 'architectSessions' key — opening a second project
+            // showed the first project's Architect chat history verbatim. Starts with a
+            // placeholder session; the real per-project sessions are swapped in once fetchConfig
+            // learns the project name (the projectName effect below), and are never persisted
+            // under the placeholder until that happens.
+            const ARCHITECT_SESSIONS_PREFIX = 'architectSessions:';
+            const ARCHITECT_ACTIVE_SESSION_PREFIX = 'activeArchSessionId:';
+            const [projectName, setProjectName] = useState(null);
+            const [architectSessions, setArchitectSessions] = useState(() => (
+                [{ id: Date.now().toString(), name: 'Session 1', messages: [] }]
+            ));
+            const [activeArchSessionId, setActiveArchSessionId] = useState(() => Date.now().toString());
+            // Guards the load effect below to run at most once per project name, and skips the
+            // persist effect's very next run so the just-loaded value doesn't get immediately
+            // clobbered by a stale write of the placeholder session from the same render pass.
+            const architectSessionsLoadedForRef = useRef(null);
+            const skipNextArchitectPersistRef = useRef(false);
+
+            useEffect(() => {
+                if (!projectName || architectSessionsLoadedForRef.current === projectName) return;
+                architectSessionsLoadedForRef.current = projectName;
+                try {
+                    const saved = localStorage.getItem(ARCHITECT_SESSIONS_PREFIX + projectName);
+                    const savedActive = localStorage.getItem(ARCHITECT_ACTIVE_SESSION_PREFIX + projectName);
+                    if (saved || savedActive) {
+                        skipNextArchitectPersistRef.current = true;
+                        if (saved) setArchitectSessions(JSON.parse(saved));
+                        if (savedActive) setActiveArchSessionId(savedActive);
+                    }
+                } catch (e) { }
+            }, [projectName]);
 
             const activeArchSession = architectSessions.find(s => s.id === activeArchSessionId) || architectSessions[0];
             const architectMessages = activeArchSession ? activeArchSession.messages : [];
@@ -1140,9 +1165,14 @@
             }, [architectSessions, activeArchSessionId]);
 
             useEffect(() => {
-                localStorage.setItem('architectSessions', JSON.stringify(architectSessions));
-                localStorage.setItem('activeArchSessionId', activeArchSessionId);
-            }, [architectSessions, activeArchSessionId]);
+                if (!projectName || architectSessionsLoadedForRef.current !== projectName) return;
+                if (skipNextArchitectPersistRef.current) {
+                    skipNextArchitectPersistRef.current = false;
+                    return;
+                }
+                localStorage.setItem(ARCHITECT_SESSIONS_PREFIX + projectName, JSON.stringify(architectSessions));
+                localStorage.setItem(ARCHITECT_ACTIVE_SESSION_PREFIX + projectName, activeArchSessionId);
+            }, [architectSessions, activeArchSessionId, projectName]);
 
             const updateArchitectMessages = (newMsgs) => {
                 setArchitectSessions(prev => prev.map(s => s.id === activeArchSessionId ? { ...s, messages: newMsgs } : s));
@@ -1427,7 +1457,10 @@
                     const res = await fetch('/api/config');
                     const data = await res.json();
 
-                    if (data.name) configNameRef.current = data.name;
+                    if (data.name) {
+                        configNameRef.current = data.name;
+                        setProjectName(data.name);
+                    }
                     if (data._context_window) setContextWindow(data._context_window);
 
                     let newNodes = [];

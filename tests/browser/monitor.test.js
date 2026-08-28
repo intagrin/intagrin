@@ -258,28 +258,86 @@ test('Architect chat self-heals a mismatched first-load session id', async () =>
     const realSessionId = 'session-A-the-only-real-one';
     const mismatchedActiveId = 'session-B-does-not-match-anything';
 
+    // architectSessions/activeArchSessionId are namespaced per-project (see monitor.html) —
+    // seed under 'demo', the name scaffoldProject('demo') gives this suite's project.
     await page.evaluateOnNewDocument(
       (sessions, activeId) => {
-        localStorage.setItem('architectSessions', JSON.stringify(sessions));
-        localStorage.setItem('activeArchSessionId', activeId);
+        localStorage.setItem('architectSessions:demo', JSON.stringify(sessions));
+        localStorage.setItem('activeArchSessionId:demo', activeId);
       },
       [{ id: realSessionId, name: 'Session 1', messages: [] }],
       mismatchedActiveId
     );
 
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    // Proof the per-project load effect has actually run, not just that the page painted —
+    // it only fires once /api/config resolves and the project name is known.
     await page.waitForFunction(
-      () => document.body.innerText.toUpperCase().includes('ACTIVE SESSION'),
+      () => localStorage.getItem('activeArchSessionId:demo') !== null,
       { timeout: 15000 }
     );
-    // The self-heal effect runs on mount; give it a beat to fire and persist back to localStorage.
+    // The self-heal effect runs right after; give it a beat to fire and persist back.
     await new Promise((r) => setTimeout(r, 500));
 
-    const correctedId = await page.evaluate(() => localStorage.getItem('activeArchSessionId'));
+    const correctedId = await page.evaluate(() => localStorage.getItem('activeArchSessionId:demo'));
     assert.equal(
       correctedId,
       realSessionId,
       'a mismatched activeArchSessionId must self-heal to a real session id, not stay orphaned'
+    );
+  } finally {
+    await page.close();
+    await context.close();
+  }
+});
+
+test('Architect chat history does not leak across different projects sharing one origin', async () => {
+  const context = await browser.createBrowserContext();
+  const page = await context.newPage();
+  try {
+    // `inta monitor` defaults to the same port (3000) for every project, so two differently-named
+    // projects opened in the same browser land on the same origin — before architectSessions was
+    // namespaced per-project (see monitor.html), they shared one global localStorage key and a
+    // second project's Architect chat showed the first project's history. Seed a DIFFERENT
+    // project's key here ('some-other-project', never 'demo') to prove this project's own load
+    // never picks it up.
+    await page.evaluateOnNewDocument(() => {
+      localStorage.setItem(
+        'architectSessions:some-other-project',
+        JSON.stringify([
+          {
+            id: 'leaked-session',
+            name: 'Session 1',
+            messages: [{ role: 'user', content: 'Secret question about some-other-project.' }],
+          },
+        ])
+      );
+      localStorage.setItem('activeArchSessionId:some-other-project', 'leaked-session');
+    });
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    // Proof this project's ('demo') own per-project load/persist cycle has actually run.
+    await page.waitForFunction(
+      () => localStorage.getItem('architectSessions:demo') !== null,
+      { timeout: 15000 }
+    );
+
+    const demoSessions = await page.evaluate(() => localStorage.getItem('architectSessions:demo'));
+    assert.ok(
+      !demoSessions.includes('Secret question about some-other-project'),
+      "another project's Architect chat history must never leak into this project's own sessions"
+    );
+    assert.ok(
+      !demoSessions.includes('leaked-session'),
+      "another project's session id must never become this project's active/loaded session"
+    );
+
+    const otherProjectUntouched = await page.evaluate(() =>
+      localStorage.getItem('architectSessions:some-other-project')
+    );
+    assert.ok(
+      otherProjectUntouched && otherProjectUntouched.includes('leaked-session'),
+      "loading this project must not overwrite another project's stored Architect history either"
     );
   } finally {
     await page.close();
@@ -951,18 +1009,21 @@ test('Architect chat auto-scrolls to the bottom when a long conversation is expa
     }
     const LAST_ARCH_TEXT = 'Architect answer number 29.';
 
+    // architectSessions/activeArchSessionId are namespaced per-project (see monitor.html) —
+    // seed under 'demo', the name scaffoldProject('demo') gives this suite's project.
     await page.evaluateOnNewDocument(
       (sessions, activeId) => {
-        localStorage.setItem('architectSessions', JSON.stringify(sessions));
-        localStorage.setItem('activeArchSessionId', activeId);
+        localStorage.setItem('architectSessions:demo', JSON.stringify(sessions));
+        localStorage.setItem('activeArchSessionId:demo', activeId);
       },
       [{ id: archSessionId, name: 'Session 1', messages: longArchMessages }],
       archSessionId
     );
 
     await page.goto(BASE_URL, { waitUntil: 'domcontentloaded' });
+    // Proof the per-project load effect has actually run before we go looking for its content.
     await page.waitForFunction(
-      () => document.body.innerText.toUpperCase().includes('ACTIVE SESSION'),
+      () => localStorage.getItem('activeArchSessionId:demo') !== null,
       { timeout: 15000 }
     );
 
