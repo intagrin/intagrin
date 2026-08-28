@@ -259,6 +259,77 @@ def test_compile_command_scaffolds_missing_prompt_and_tool_then_leaves_them_alon
     assert tool_path.read_text() == original_tool_content
 
 
+def test_compile_command_drafts_a_real_system_prompt_not_a_placeholder(mock_blueprint, monkeypatch):
+    """The scaffolded prompt file used to always be the literal one-liner
+    f"You are {description}.\\n" — must now be genuinely drafted by the compile model, with the
+    agent's tools/handoffs and the blueprint itself as context, not a fixed template. The earlier
+    version of this test only checked prompt_path.exists(), which would have passed even if the
+    scaffolded content were nonsense — asserting on actual content this time."""
+    config = dict(VALID_MINIMAL_CONFIG)
+    config["agents"] = {
+        "triage": {
+            "description": "Routes tickets.",
+            "system_prompt_file": "prompts/triage.jinja2",
+            "handoffs": ["billing"],
+            "tools": [{"name": "lookup_ticket", "module": "draft_prompt_test_module"}],
+        },
+        "billing": {"description": "Handles billing."},
+    }
+    seen_draft_user_prompts = []
+
+    def mock_completion(*args, **kwargs):
+        sys_content = kwargs["messages"][0]["content"]
+        if "expert prompt engineer" in sys_content:
+            seen_draft_user_prompts.append(kwargs["messages"][1]["content"])
+            return _MockResponse("You are the ticket triage specialist. Your job is to read "
+                                  "incoming support tickets, look them up with lookup_ticket, "
+                                  "and hand off to billing whenever the issue is payment-related.")
+        return _MockResponse(json.dumps(config))
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", mock_completion)
+
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
+
+    assert result.exit_code == 0, result.stdout
+    drafted = Path("prompts/triage.jinja2").read_text()
+    assert drafted != "You are Routes tickets.\n"
+    assert "lookup_ticket" in drafted or "triage" in drafted.lower()
+    # The draft call must actually have been given the tool/handoff/blueprint context, not just
+    # the bare description.
+    assert len(seen_draft_user_prompts) == 1
+    assert "lookup_ticket" in seen_draft_user_prompts[0]
+    assert "billing" in seen_draft_user_prompts[0]
+    assert "triage and support agent" in seen_draft_user_prompts[0]  # from mock_blueprint's text
+
+
+def test_compile_command_falls_back_to_a_placeholder_when_prompt_drafting_fails(
+    mock_blueprint, monkeypatch
+):
+    """Prompt drafting is best-effort — a failure there (network error, bad response) must never
+    block the compile itself. Falls back to the old one-liner, not a crash."""
+    config = dict(VALID_MINIMAL_CONFIG)
+    config["agents"] = {
+        "triage": {"description": "Routes tickets.", "system_prompt_file": "prompts/triage.jinja2"}
+    }
+
+    def mock_completion(*args, **kwargs):
+        sys_content = kwargs["messages"][0]["content"]
+        if "expert prompt engineer" in sys_content:
+            raise RuntimeError("simulated network failure")
+        return _MockResponse(json.dumps(config))
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", mock_completion)
+
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
+
+    assert result.exit_code == 0, result.stdout
+    assert Path("prompts/triage.jinja2").read_text() == "You are Routes tickets.\n"
+
+
 def test_compile_command_reports_missing_api_key_without_a_raw_traceback(tmp_path, monkeypatch):
     """Regression test: `inta compile` in a fresh directory with no API key configured anywhere
     used to crash with a raw litellm traceback deep in a provider SDK. It must instead fail with

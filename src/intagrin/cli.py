@@ -1411,10 +1411,82 @@ def _ensure_local_tool_stub(project_dir: Path, tool_cfg) -> list[Path]:
     return created
 
 
-def _scaffold_referenced_files(project_dir: Path, config) -> list[Path]:
-    """Creates minimal placeholder prompt files and stub tool functions for anything the
-    compiled config references that doesn't exist yet. Never touches a file that already exists
-    — a re-compile against manually-edited prompts/tools leaves them alone."""
+def _placeholder_prompt(description: str) -> str:
+    """The fallback used when prompt drafting isn't attempted or fails. Avoids a doubled period
+    when `description` (an ai.yaml `agents.<name>.description`, often written as a full sentence
+    already) already ends with its own punctuation."""
+    if description.endswith((".", "!", "?")):
+        return f"You are {description}\n"
+    return f"You are {description}.\n"
+
+
+def _draft_agent_system_prompt(
+    agent_name: str, agent_cfg, blueprint_content: str, compile_model: str
+) -> str:
+    """Asks the same model that just compiled the blueprint to draft a real system prompt for one
+    agent — persona, responsibilities, tool-usage guidance, when to hand off — instead of the
+    one-line `f"You are {description}."` placeholder this used to always write. The blueprint is
+    already sitting right there with everything a prompt engineer would actually want to know
+    about this agent's place in the larger system; reusing it costs nothing extra to collect.
+
+    Best-effort: any failure here (network, malformed response, no key for a *different* provider
+    than the one already validated for the compile call itself) falls back to the old one-liner
+    rather than ever blocking or breaking a compile over prompt quality — the file still gets
+    written, just worse, exactly like today until someone edits it by hand."""
+    description = getattr(agent_cfg, "description", None) or f"the {agent_name} agent"
+    tool_names = [t.name for t in (getattr(agent_cfg, "tools", []) or []) if getattr(t, "name", None)]
+    handoff_targets = list(getattr(agent_cfg, "handoffs", []) or [])
+    delegation_targets = list(getattr(agent_cfg, "delegations", []) or [])
+
+    try:
+        import litellm
+
+        sys_prompt = (
+            "You are an expert prompt engineer for the IntaGrin multi-agent framework. Given one "
+            "agent's role and the full system it's part of, write a production-quality system "
+            "prompt for that agent: its persona and responsibilities, when and how to use its "
+            "tools, when to hand off to another agent (if it has any), and any constraints implied "
+            "by its role. 100-250 words. Output ONLY the system prompt text itself — no markdown "
+            "code fences, no headers, no explanation of what you wrote."
+        )
+        user_prompt = (
+            f"AGENT NAME: {agent_name}\n"
+            f"DESCRIPTION: {description}\n"
+            f"TOOLS AVAILABLE: {', '.join(tool_names) or 'none'}\n"
+            f"HANDS OFF TO: {', '.join(handoff_targets) or 'no one — this agent replies directly'}\n"
+            f"DELEGATES TO: {', '.join(delegation_targets) or 'no one'}\n\n"
+            f"FULL SYSTEM BLUEPRINT (for context on this agent's place in the larger system):\n"
+            f"{blueprint_content}\n\n"
+            f"Write the system prompt for {agent_name} now."
+        )
+        response = litellm.completion(
+            model=compile_model,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=500,
+        )
+        drafted = response.choices[0].message.content.strip()
+        if drafted:
+            return drafted + "\n"
+    except Exception as e:
+        Tracer.log_error(f"Prompt drafting failed for '{agent_name}', using a placeholder: {e}")
+
+    return _placeholder_prompt(description)
+
+
+def _scaffold_referenced_files(
+    project_dir: Path,
+    config,
+    compile_model: str | None = None,
+    blueprint_content: str | None = None,
+) -> list[Path]:
+    """Creates prompt files and stub tool functions for anything the compiled config references
+    that doesn't exist yet. Never touches a file that already exists — a re-compile against
+    manually-edited prompts/tools leaves them alone. Prompt files are LLM-drafted (see
+    _draft_agent_system_prompt) when compile_model/blueprint_content are given; falls back to a
+    one-line placeholder otherwise, e.g. if ever called without them."""
     from .config.schema import LocalToolConfig
 
     created: list[Path] = []
@@ -1429,8 +1501,16 @@ def _scaffold_referenced_files(project_dir: Path, config) -> list[Path]:
             prompt_path = project_dir / prompt_file
             if not prompt_path.exists():
                 prompt_path.parent.mkdir(parents=True, exist_ok=True)
-                description = getattr(agent_cfg, "description", None) or f"the {agent_name} agent"
-                prompt_path.write_text(f"You are {description}.\n")
+                if compile_model and blueprint_content:
+                    text = _draft_agent_system_prompt(
+                        agent_name, agent_cfg, blueprint_content, compile_model
+                    )
+                else:
+                    description = (
+                        getattr(agent_cfg, "description", None) or f"the {agent_name} agent"
+                    )
+                    text = _placeholder_prompt(description)
+                prompt_path.write_text(text)
                 created.append(prompt_path)
 
         for tool_cfg in getattr(agent_cfg, "tools", []) or []:
@@ -1678,10 +1758,12 @@ You MUST conform to this exact JSON Schema for your output. Notice which fields 
             "[bold green]Successfully compiled blueprint into ai.yaml (schema + router syntax validated)![/bold green]"
         )
 
-        scaffolded = _scaffold_referenced_files(project_dir, validated_config)
+        scaffolded = _scaffold_referenced_files(
+            project_dir, validated_config, compile_model, blueprint_content
+        )
         for path in scaffolded:
             console.print(
-                f"[green]✓ Scaffolded {path.relative_to(project_dir)}[/green] [dim](review and implement — this is a placeholder)[/dim]"
+                f"[green]✓ Scaffolded {path.relative_to(project_dir)}[/green] [dim](review before relying on it)[/dim]"
             )
 
         console.print("\n[bold cyan]Running `inta verify` on the compiled swarm...[/bold cyan]")
