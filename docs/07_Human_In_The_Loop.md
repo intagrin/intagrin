@@ -11,7 +11,15 @@ tools:
     requires_approval: true
 ```
 
-When the LLM tries to call `execute_sql`, the engine **instantly aborts execution**, safely suspends the current conversation state to Postgres/SQLite, and returns a pending status to the API.
+When the LLM tries to call `execute_sql`, the engine **instantly aborts execution**, suspends the current conversation state, and returns a pending status to the API.
+
+**This requires a persistent `memory.type`** (`sqlite`, `postgres`, or `redis`) — the schema's own
+default, `sliding_window` (in-process, lost the moment the request ends), can't actually suspend
+anything durably. With it, the pause genuinely happens (the tool call really does return "paused
+awaiting human approval") but there's no session left to resume from afterward, and Monitor's
+dashboard has nothing to query either, so its Approve/Deny button never appears — `inta verify`
+advises (never fails) when it finds a `requires_approval`/`required_approvers` tool alongside a
+non-persistent `memory.type`.
 
 ## 2. Async Webhook Notifications
 If your agents are running in background cron jobs, you need a way to know they are waiting. 

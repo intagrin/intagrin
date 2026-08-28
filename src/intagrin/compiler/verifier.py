@@ -250,6 +250,35 @@ class GraphVerifier:
             for agent_name, tool_name in ungated_sandboxes:
                 console.print(f"   ↳ [dim]{agent_name}.{tool_name}[/dim]")
 
+        # --- requires_approval needs a persistent memory backend: a pause is held in
+        # state["_pending_approval"], only resumed via a *separate* /resume request, and only
+        # ever surfaced in Monitor's session list (the Approve/Deny button) if that session's
+        # state can actually be looked up there — server/monitor.py's get_memory() only knows
+        # how to list sqlite/postgres/custom-with-get_all_sessions backends. memory.type left at
+        # its schema default (sliding_window) or explicitly buffer is in-process only: the pause
+        # genuinely happens (the tool call really does return "awaiting human approval"), but
+        # Monitor has nothing to query, so the button never renders, and nothing survives past
+        # that process anyway to resume from. Advisory only — a project with its own resume path
+        # that doesn't depend on Monitor's session list can ignore this. ---
+        if cfg.memory.type in ("sliding_window", "buffer"):
+            approval_tools = []
+            for agent_name, agent_cfg in cfg.agents.items():
+                for tool in getattr(agent_cfg, "tools", []) or []:
+                    resolved = _resolve(tool)
+                    if getattr(resolved, "requires_approval", False) or getattr(
+                        resolved, "required_approvers", None
+                    ):
+                        approval_tools.append((agent_name, tool.name))
+            if approval_tools:
+                console.print(
+                    f"\n[dim]ℹ requires_approval tool(s) with memory.type: {cfg.memory.type} — "
+                    "a pause only shows up in Monitor's session list (the Approve/Deny button) "
+                    "and only survives to be resumed with a persistent backend. Consider "
+                    "memory.type: sqlite (or postgres/redis) instead:[/dim]"
+                )
+                for agent_name, tool_name in approval_tools:
+                    console.print(f"   ↳ [dim]{agent_name}.{tool_name}[/dim]")
+
         # --- spawns.on_complete reserved keys: apply_state_write (the same pipeline write_state
         # itself goes through) silently rejects any key starting with `_` — reserved for internal
         # engine bookkeeping (_pending_approval, _dynamic_agents, _active_agent_name, ...). A

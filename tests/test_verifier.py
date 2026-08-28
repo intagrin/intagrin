@@ -679,3 +679,92 @@ agents:
 
         assert "no_gate.send_email" in output
         assert "has_gate.send_email" not in output
+
+
+def test_verifier_advises_on_requires_approval_with_non_persistent_memory():
+    """memory: {} (type omitted) defaults to sliding_window (in-process only) — Monitor's session
+    list (and its Approve/Deny button) has nothing to query for that backend, so a
+    requires_approval pause genuinely happens but is never resumable from the UI. Must be
+    flagged, naming the specific agent.tool."""
+    ai_yaml = """version: "1.0"
+name: "approval-no-persistence-app"
+default_agent: "instagram_creator"
+model:
+  primary: "gemini/gemini-2.5-flash"
+memory: {}
+agents:
+  instagram_creator:
+    tools:
+      - name: "review_content"
+        module: "verifier_memory_nudge_test_module"
+        requires_approval: true
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(ai_yaml)
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "requires_approval tool(s) with memory.type: sliding_window" in output
+        assert "instagram_creator.review_content" in output
+
+
+def test_verifier_advises_on_required_approvers_with_buffer_memory():
+    """required_approvers implies the same human-in-the-loop pause as requires_approval, even if
+    requires_approval itself was left false — must be caught the same way."""
+    ai_yaml = """version: "1.0"
+name: "approvers-no-persistence-app"
+default_agent: "billing"
+model:
+  primary: "gemini/gemini-2.5-flash"
+memory:
+  type: "buffer"
+agents:
+  billing:
+    tools:
+      - name: "issue_refund"
+        module: "verifier_memory_nudge_test_module_2"
+        required_approvers: ["alice", "bob"]
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(ai_yaml)
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "requires_approval tool(s) with memory.type: buffer" in output
+        assert "billing.issue_refund" in output
+
+
+def test_verifier_does_not_advise_when_approval_tool_has_persistent_memory():
+    """The common, correct shape (memory.type: sqlite) must never be flagged."""
+    ai_yaml = """version: "1.0"
+name: "approval-with-persistence-app"
+default_agent: "instagram_creator"
+model:
+  primary: "gemini/gemini-2.5-flash"
+memory:
+  type: "sqlite"
+agents:
+  instagram_creator:
+    tools:
+      - name: "review_content"
+        module: "verifier_memory_nudge_test_module_3"
+        requires_approval: true
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(ai_yaml)
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "requires_approval tool(s) with memory.type" not in output
