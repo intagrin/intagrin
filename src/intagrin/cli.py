@@ -58,6 +58,59 @@ def _check_llm_api_key(model: str) -> None:
             f"shell, then re-run the command.",
         )
 
+def _prompt_for_llm_model(project_dir: Path | None = None) -> str:
+    """Interactive provider/model picker for a CLI-driven LLM call with no `ai.yaml` yet to read
+    `model.primary` from (e.g. `inta new --withagent`, `inta compile` on a brand-new blueprint).
+    Shared by both so a provider added here (or a bug fixed here) doesn't need fixing twice —
+    this used to be inlined separately in run_agent_wizard, missing Anthropic entirely despite
+    _PROVIDER_API_KEY_ENV_VARS already knowing about it. "Custom" covers everything a fixed list
+    can't enumerate — any other provider, any self-hosted/local endpoint — as a raw LiteLLM model
+    string, so this never gates what a user can actually run on.
+
+    A freshly-collected API key is set in os.environ for this process AND, when project_dir is
+    given, appended to that project's .env so it's still there on the next run — appended, not
+    written outright, so this can never silently wipe out other vars already in an existing .env
+    (the previous inlined version in run_agent_wizard did exactly that)."""
+    from rich.prompt import IntPrompt, Prompt
+
+    console.print("\n[bold cyan]Which LLM provider?[/bold cyan]")
+    console.print("  [1] OpenAI (GPT-4o)")
+    console.print("  [2] Google Gemini")
+    console.print("  [3] Anthropic Claude")
+    console.print("  [4] Ollama (local)")
+    console.print("  [5] Llama.cpp (local)")
+    console.print("  [6] Other / custom (any LiteLLM model string)")
+
+    choice = IntPrompt.ask(
+        "\nChoose a provider", choices=["1", "2", "3", "4", "5", "6"], default=1
+    )
+
+    def _collect_key(prompt: str, env_var: str, model_str: str) -> str:
+        key = Prompt.ask(prompt, password=True)
+        os.environ[env_var] = key
+        if project_dir is not None:
+            with open(project_dir / ".env", "a") as f:
+                f.write(f"{env_var}={key}\n")
+        return model_str
+
+    if choice == 1:
+        return _collect_key("Enter your OpenAI API Key", "OPENAI_API_KEY", "openai/gpt-4o")
+    if choice == 2:
+        return _collect_key("Enter your Gemini API Key", "GEMINI_API_KEY", "gemini/gemini-2.5-flash")
+    if choice == 3:
+        return _collect_key(
+            "Enter your Anthropic API Key", "ANTHROPIC_API_KEY", "anthropic/claude-sonnet-4-5"
+        )
+    if choice == 4:
+        return Prompt.ask("Enter your Ollama model name", default="ollama/llama3")
+    if choice == 5:
+        return Prompt.ask("Enter your Llama.cpp model path", default="llama.cpp/llama3")
+    return Prompt.ask(
+        "Enter a LiteLLM model string (e.g. 'mistral/mistral-large-latest', "
+        "'openai/my-self-hosted-endpoint')"
+    )
+
+
 # `inta copilot`'s generated agent/skill content lives as plain .md files under templates/copilot/
 # instead of embedded Python string constants — easier to review/edit as markdown, and it ships
 # with the package via [tool.setuptools.package-data] in pyproject.toml.
@@ -656,40 +709,13 @@ def _generate_and_validate_wizard_config(
 
 
 def run_agent_wizard(project_dir: Path, project_name: str):
-    from rich.prompt import IntPrompt, Prompt
+    from rich.prompt import Prompt
 
     console.print(
         "\n[bold purple]🤖 Welcome to the AI Architect Wizard![/bold purple]\n"
     )
 
-    console.print("[bold cyan]Supported LLM Providers:[/bold cyan]")
-    console.print("  [1] OpenAI (GPT-4o)")
-    console.print("  [2] Google Gemini (1.5 Pro)")
-    console.print("  [3] Ollama (Local)")
-    console.print("  [4] Llama.cpp (Local)")
-
-    choice = IntPrompt.ask(
-        "\nChoose your LLM provider", choices=["1", "2", "3", "4"], default=1
-    )
-    providers = ["openai", "gemini", "ollama", "llama.cpp"]
-    provider = providers[choice - 1]
-
-    api_key = ""
-    model = ""
-    if provider == "openai":
-        api_key = Prompt.ask("Enter your OpenAI API Key", password=True)
-        model = "openai/gpt-4o"
-        os.environ["OPENAI_API_KEY"] = api_key
-    elif provider == "gemini":
-        api_key = Prompt.ask("Enter your Gemini API Key", password=True)
-        model = "gemini/gemini-1.5-pro"
-        os.environ["GEMINI_API_KEY"] = api_key
-    elif provider == "ollama":
-        model = Prompt.ask("Enter your Ollama model name", default="ollama/llama3")
-    elif provider == "llama.cpp":
-        model = Prompt.ask(
-            "Enter your Llama.cpp model path", default="llama.cpp/llama3"
-        )
+    model = _prompt_for_llm_model(project_dir)
 
     idea = Prompt.ask(
         "\n[bold blue]What kind of AI application do you want to build?[/bold blue]"
@@ -721,9 +747,6 @@ Return EXACTLY a valid JSON object with two keys: "ai_yaml" (string of yaml cont
             _write_ai_yaml(project_dir, ai_yaml_text)
             (project_dir / "tools" / "custom_tools.py").write_text(custom_tools_py)
             console.print("[bold green]Project generated successfully via AI![/bold green]")
-
-        if api_key:
-            (project_dir / ".env").write_text(f"{provider.upper()}_API_KEY={api_key}\n")
 
     except Exception as e:
         console.print(
@@ -1407,6 +1430,15 @@ def compile_command(
     blueprint_file: str = typer.Argument(
         "blueprint.md", help="Path to the Markdown blueprint file"
     ),
+    model: str = typer.Option(
+        None,
+        "--model",
+        "-m",
+        help=(
+            "LiteLLM model string to compile with (e.g. 'openai/gpt-4o'). Skips the model "
+            "resolution below entirely — set this for scripted/non-interactive use."
+        ),
+    ),
 ):
     """
     Compile a Natural Language Markdown blueprint into a production ai.yaml swarm.
@@ -1433,12 +1465,30 @@ def compile_command(
         )
         raise typer.Exit(1)
 
-    # No ai.yaml exists yet at this point, so parse_project() (the usual place .env gets loaded)
-    # never runs — load it directly from the same directory as the blueprint, mirroring
-    # architect_command's identical bootstrap-before-ai.yaml situation.
+    # parse_project() (the usual place .env gets loaded) only runs below once we know ai.yaml
+    # exists — load it directly here too so a brand-new project's .env (an API key the model
+    # resolution below might need) is picked up regardless of which branch runs.
     load_dotenv(project_dir / ".env")
 
-    compile_model = "gemini/gemini-2.5-flash"
+    yaml_path = project_dir / "ai.yaml"
+    existing_yaml = yaml_path.read_text() if yaml_path.exists() else ""
+
+    # Model resolution, in order: an explicit --model always wins; otherwise reuse an already-
+    # configured project's own model.primary (re-compiling a blueprint shouldn't silently switch
+    # providers on you); otherwise — nothing to infer from yet, this is a first-ever compile —
+    # ask interactively rather than forcing one specific provider on someone who may not even
+    # have that key. Mirrors server/monitor.py's run_architect, which resolves the same way for
+    # the same reason.
+    if model:
+        compile_model = model
+    elif existing_yaml:
+        try:
+            compile_model = parse_project(project_dir).config.model.primary
+        except Exception:
+            compile_model = "gemini/gemini-2.5-flash"
+    else:
+        compile_model = _prompt_for_llm_model(project_dir)
+
     try:
         _check_llm_api_key(compile_model)
     except IntaGrinError as e:
@@ -1446,9 +1496,6 @@ def compile_command(
         raise typer.Exit(1)
 
     blueprint_content = bp_path.read_text()
-
-    yaml_path = project_dir / "ai.yaml"
-    existing_yaml = yaml_path.read_text() if yaml_path.exists() else ""
 
     console.print(f"[bold cyan]Compiling {blueprint_file} into ai.yaml...[/bold cyan]")
 

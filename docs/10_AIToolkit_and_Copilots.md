@@ -25,7 +25,13 @@ When you run `inta copilot`, it installs the **`intagrin-compile`** skill into y
 The IDE Agent will read your `blueprint.md`, read your existing `ai.yaml`, and intelligently prompt you if they are out of sync. It acts as an interactive software architect, automatically writing your `ai.yaml` and scaffolding your `.jinja2` prompt files for you — and, per the skill's own instructions, always finishes by running `inta verify` and fixing anything it reports before calling the task done, rather than assuming the config it wrote is correct.
 
 ## 3. The CLI Compiler
-If you prefer CI/CD or terminal workflows, you can bypass the IDE agent and use the native CLI compiler. `inta compile` writes `ai.yaml` itself, so — unlike `inta dev`/`inta run`, which read the key from a project's already-written `ai.yaml`/`.env` — it needs a model key available *before* that file exists: either export it in your shell (e.g. `GEMINI_API_KEY=...`), or drop it in a `.env` file next to `blueprint.md`. Running without one fails fast with a clear `IG-CLI-008` error rather than a raw stack trace.
+If you prefer CI/CD or terminal workflows, you can bypass the IDE agent and use the native CLI compiler. `inta compile` writes `ai.yaml` itself, so — unlike `inta dev`/`inta run`, which read the key from a project's already-written `ai.yaml`/`.env` — it needs to resolve which model to compile *with* before that file necessarily exists. It picks, in order:
+
+1. **`--model`/`-m`**, if you pass it — always wins, and is the one to use for CI/CD or any other non-interactive run: `inta compile blueprint.md --model openai/gpt-4o`.
+2. **The project's own `model.primary`**, if `ai.yaml` already exists — re-compiling an existing project's blueprint reuses whatever provider it's already configured with, rather than silently switching to a different one for just this call.
+3. **An interactive prompt**, only for a first-ever compile with neither of the above — asks which provider (OpenAI, Gemini, Anthropic, a local Ollama/Llama.cpp model, or any other LiteLLM model string), then the API key if that provider needs one. The key is both set for this run and appended to a `.env` next to `blueprint.md`, so you're not asked again next time.
+
+Whichever way the model gets resolved, a missing API key fails fast with a clear `IG-CLI-008` error rather than a raw stack trace.
 ```bash
 inta compile blueprint.md
 ```

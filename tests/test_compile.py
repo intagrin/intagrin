@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -60,7 +61,7 @@ def test_compile_command_valid_config_writes_ai_yaml(mock_blueprint, monkeypatch
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    result = runner.invoke(app, ["compile", "blueprint.md"])
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
 
     assert result.exit_code == 0, result.stdout
     assert "Successfully compiled" in result.stdout
@@ -84,7 +85,7 @@ def test_compile_command_invalid_config_never_writes_ai_yaml(mock_blueprint, mon
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    result = runner.invoke(app, ["compile", "blueprint.md"])
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
 
     assert result.exit_code == 1
     assert "NOT written" in result.stdout
@@ -114,7 +115,7 @@ def test_compile_command_stops_and_asks_instead_of_guessing_a_tech_choice(
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    result = runner.invoke(app, ["compile", "blueprint.md"])
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
 
     assert result.exit_code == 1
     assert "Which memory backend" in result.stdout
@@ -136,7 +137,7 @@ def test_compile_command_self_heals_after_one_bad_attempt(mock_blueprint, monkey
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    result = runner.invoke(app, ["compile", "blueprint.md"])
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
 
     assert result.exit_code == 0, result.stdout
     assert call_count["n"] == 2
@@ -155,7 +156,7 @@ def test_compile_command_gives_up_after_max_attempts(mock_blueprint, monkeypatch
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    result = runner.invoke(app, ["compile", "blueprint.md"])
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
 
     assert result.exit_code == 1
     assert call_count["n"] == 3  # 1 initial + 2 self-heal retries, then give up
@@ -180,7 +181,7 @@ def test_compile_command_rejects_unsupported_router_condition_syntax(mock_bluepr
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    result = runner.invoke(app, ["compile", "blueprint.md"])
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
 
     assert result.exit_code == 1
     assert not Path("ai.yaml").exists()
@@ -209,7 +210,7 @@ def test_compile_command_rejects_on_complete_writing_to_a_reserved_key(mock_blue
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    result = runner.invoke(app, ["compile", "blueprint.md"])
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
 
     assert result.exit_code == 1
     assert not Path("ai.yaml").exists()
@@ -236,7 +237,7 @@ def test_compile_command_scaffolds_missing_prompt_and_tool_then_leaves_them_alon
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    result = runner.invoke(app, ["compile", "blueprint.md"])
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
     assert result.exit_code == 0, result.stdout
 
     prompt_path = Path("prompts/triage.jinja2")
@@ -250,7 +251,9 @@ def test_compile_command_scaffolds_missing_prompt_and_tool_then_leaves_them_alon
     prompt_path.write_text("You are the real triage agent.\n")
     original_tool_content = tool_path.read_text()
 
-    result2 = runner.invoke(app, ["compile", "blueprint.md"], input="y\n")
+    result2 = runner.invoke(
+        app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"], input="y\n"
+    )
     assert result2.exit_code == 0, result2.stdout
     assert prompt_path.read_text() == "You are the real triage agent.\n"
     assert tool_path.read_text() == original_tool_content
@@ -273,7 +276,7 @@ def test_compile_command_reports_missing_api_key_without_a_raw_traceback(tmp_pat
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    result = runner.invoke(app, ["compile", "blueprint.md"])
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
 
     assert result.exit_code == 1
     assert "IG-CLI-008" in result.stdout
@@ -300,7 +303,91 @@ def test_compile_command_loads_dot_env_from_the_project_directory(mock_blueprint
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    result = runner.invoke(app, ["compile", "blueprint.md"])
+    result = runner.invoke(app, ["compile", "blueprint.md", "--model", "gemini/gemini-2.5-flash"])
 
     assert result.exit_code == 0, result.stdout
     assert seen_env_values == ["from-dot-env-file"]
+
+
+def test_compile_command_reuses_an_already_configured_projects_own_model(mock_blueprint, monkeypatch):
+    """Re-compiling a blueprint into a project that already has an ai.yaml must reuse that
+    project's own model.primary for the compile call itself, not silently force a different
+    provider — the same reasoning server/monitor.py's run_architect already applies."""
+    (mock_blueprint.parent / "ai.yaml").write_text(
+        "version: '1.0'\nname: existing\ndefault_agent: triage\n"
+        "model:\n  primary: anthropic/claude-sonnet-4-5\nmemory:\n  type: sqlite\n"
+        "agents:\n  triage:\n    description: Routes tickets.\n"
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    seen_models = []
+
+    def mock_completion(*args, **kwargs):
+        seen_models.append(kwargs.get("model"))
+        return _MockResponse(json.dumps(VALID_MINIMAL_CONFIG))
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", mock_completion)
+
+    result = runner.invoke(app, ["compile", "blueprint.md"], input="y\n")
+
+    assert result.exit_code == 0, result.stdout
+    assert seen_models == ["anthropic/claude-sonnet-4-5"]
+
+
+def test_compile_command_explicit_model_flag_overrides_an_existing_projects_model(
+    mock_blueprint, monkeypatch
+):
+    """--model always wins, even over an already-configured project's own model.primary — the
+    explicit, scripted-use escape hatch should never be silently second-guessed. Deliberately
+    uses a third, distinct provider (neither the project's own anthropic/... nor the compiler's
+    gemini/... hardcoded fallback) so this can't coincidentally pass for the wrong reason."""
+    (mock_blueprint.parent / "ai.yaml").write_text(
+        "version: '1.0'\nname: existing\ndefault_agent: triage\n"
+        "model:\n  primary: anthropic/claude-sonnet-4-5\nmemory:\n  type: sqlite\n"
+        "agents:\n  triage:\n    description: Routes tickets.\n"
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
+    seen_models = []
+
+    def mock_completion(*args, **kwargs):
+        seen_models.append(kwargs.get("model"))
+        return _MockResponse(json.dumps(VALID_MINIMAL_CONFIG))
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", mock_completion)
+
+    result = runner.invoke(
+        app, ["compile", "blueprint.md", "--model", "openai/gpt-4o"], input="y\n"
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert seen_models == ["openai/gpt-4o"]
+
+
+def test_compile_command_prompts_interactively_when_nothing_to_infer_from(tmp_path, monkeypatch):
+    """First-ever compile: no ai.yaml yet and no --model given. Must ask which provider rather
+    than silently forcing one specific provider on someone who may not even have that key."""
+    monkeypatch.chdir(tmp_path)
+    bp = tmp_path / "blueprint.md"
+    bp.write_text("# Vision\nCreate a triage and support agent.")
+
+    seen_models = []
+
+    def mock_completion(*args, **kwargs):
+        seen_models.append(kwargs.get("model"))
+        return _MockResponse(json.dumps(VALID_MINIMAL_CONFIG))
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", mock_completion)
+
+    # Provider menu choice "1" (OpenAI), then the API key prompt.
+    result = runner.invoke(app, ["compile", "blueprint.md"], input="1\nsk-test-not-real\n")
+
+    assert result.exit_code == 0, result.stdout
+    assert seen_models == ["openai/gpt-4o"]
+    assert os.environ.get("OPENAI_API_KEY") == "sk-test-not-real"
+    # The freshly-collected key must be persisted for next time, not just this process.
+    assert "OPENAI_API_KEY=sk-test-not-real" in (tmp_path / ".env").read_text()
