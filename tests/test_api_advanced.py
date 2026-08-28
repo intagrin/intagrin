@@ -6,7 +6,9 @@ from intagrin.server.api import (
     ChatRequest,
     ChatResponse,
     ResumeRequest,
+    _record_turn_failure,
     chat_endpoint,
+    chat_stream_endpoint,
     resume_endpoint,
     stream_endpoint,
 )
@@ -131,6 +133,15 @@ def test_chat_endpoint_logs_error_run():
         mock_log.assert_called_once()
         assert mock_log.call_args.kwargs["status"] == "error"
         assert "boom" in mock_log.call_args.kwargs["error"]
+
+        # Previously only run_logs (admin-only, GET /api/logs) ever recorded this — anyone
+        # reviewing the session itself afterward (Monitor's Playground, `inta replay`) saw
+        # nothing wrong, just an abrupt stop with no explanation. Must now be a real, saved
+        # message in the conversation too.
+        assert mock_engine.messages[-1]["role"] == "assistant"
+        assert "boom" in mock_engine.messages[-1]["content"]
+        assert "unexpected error" in mock_engine.messages[-1]["content"]
+        assert mock_engine._save_checkpoint.call_count >= 2  # once pre-turn, once for the failure
 
 
 def test_resume_draft_and_review():
@@ -525,6 +536,92 @@ def test_stream_endpoint_error_path_yields_error_event_and_logs():
         assert mock_log.call_args.kwargs["endpoint"] == "/stream"
         assert mock_log.call_args.kwargs["status"] == "error"
         assert "stream broke" in mock_log.call_args.kwargs["error"]
+
+        # Same gap fixed as /chat's error path above — this must be durably saved into the
+        # conversation itself, not just visible to whoever happened to be watching the live SSE
+        # stream (or the admin-only run-log) at the exact moment it happened.
+        assert mock_engine.messages[-1]["role"] == "assistant"
+        assert "stream broke" in mock_engine.messages[-1]["content"]
+        assert mock_engine._save_checkpoint.call_count >= 1
+
+
+def test_chat_stream_endpoint_error_path_persists_and_yields_error_event():
+    """chat_stream_endpoint had the identical gap as stream_endpoint above, just never covered by
+    a test — same fix, same regression guard."""
+
+    async def raising_stream(*args, **kwargs):
+        yield {"type": "content", "content": "partial..."}
+        raise RuntimeError("chat stream broke")
+
+    with patch(
+        "intagrin.server.api.parse_project", return_value=_mock_graph_with_no_approver()
+    ), patch(
+        "intagrin.server.api.get_shared_resources_cache",
+        return_value=MagicMock(get=AsyncMock(return_value=MagicMock())),
+    ), patch("intagrin.server.api.record_run_log") as mock_log:
+        mock_engine = MagicMock()
+        mock_engine._await_last_checkpoint = AsyncMock()
+        mock_engine.initialize = AsyncMock()
+        mock_engine._run_agent_turn_stream = raising_stream
+        mock_engine._apply_guardrails.return_value = "Hello"
+        mock_engine._compress_memory = AsyncMock()
+        mock_engine._save_checkpoint = MagicMock()
+        mock_engine.state = {"_metrics": {"total_tokens": 0, "total_cost": 0.0}}
+        mock_engine.messages = []
+        mock_engine.is_transferring = False
+        mock_engine.active_agent_name = "triage"
+
+        with patch("intagrin.server.api.RuntimeEngine", return_value=mock_engine):
+
+            async def collect():
+                response = await chat_stream_endpoint(
+                    ChatRequest(message="Hello", session_id="session_99"),
+                    user_context="tenant_xyz123",
+                )
+                chunks = []
+                async for chunk in response.body_iterator:
+                    chunks.append(chunk)
+                return chunks
+
+            chunks = asyncio.run(collect())
+
+        body = "".join(chunks)
+        assert '"type": "error"' in body
+        assert "chat stream broke" in body
+
+        mock_log.assert_called_once()
+        assert mock_log.call_args.kwargs["endpoint"] == "/chat/stream"
+        assert mock_log.call_args.kwargs["status"] == "error"
+
+        assert mock_engine.messages[-1]["role"] == "assistant"
+        assert "chat stream broke" in mock_engine.messages[-1]["content"]
+        assert mock_engine._save_checkpoint.call_count >= 1
+
+
+def test_record_turn_failure_truncates_a_long_error_and_never_raises_on_its_own_failure():
+    """Two properties: (1) a very long exception message gets truncated in the saved message
+    rather than bloating the conversation forever, and (2) if persisting the failure record
+    itself blows up (e.g. the checkpoint backend is what's actually down), that must never
+    propagate — it's logged and swallowed, since the ORIGINAL error is what the caller needs to
+    see, not a new one about failing to record the first."""
+    mock_engine = MagicMock()
+    mock_engine.messages = []
+    mock_engine._save_checkpoint = MagicMock(side_effect=RuntimeError("checkpoint backend down"))
+
+    long_error = RuntimeError("x" * 1000)
+    # Must not raise, despite _save_checkpoint blowing up internally.
+    asyncio.run(_record_turn_failure(mock_engine, MagicMock(), long_error))
+
+    assert len(mock_engine.messages) == 1
+    assert len(mock_engine.messages[0]["content"]) < 700
+    assert "truncated" in mock_engine.messages[0]["content"]
+
+
+def test_record_turn_failure_is_a_noop_when_engine_or_graph_is_none():
+    """engine/graph can legitimately still be None if construction itself failed before either
+    was assigned — must not raise (e.g. AttributeError on None.messages)."""
+    asyncio.run(_record_turn_failure(None, MagicMock(), RuntimeError("boom")))
+    asyncio.run(_record_turn_failure(MagicMock(), None, RuntimeError("boom")))
 
 
 def _nested_pending_action(**overrides):

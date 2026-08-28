@@ -238,6 +238,44 @@ def _log_run(
     )
 
 
+async def _record_turn_failure(
+    engine: RuntimeEngine | None, graph, error: Exception
+) -> None:
+    """Persists a clear, human-readable trace of an unhandled mid-turn exception directly into
+    the checkpointed conversation. Without this, run_logs (the audit table behind the admin-only
+    GET /api/logs) was the only place a genuine crash ever got recorded — a *normal* tool
+    execution error (a rate limit, a bad argument) is already caught inside the turn loop itself
+    and turned into a visible tool-result message the LLM gets to respond to, so this is
+    specifically for the rarer case that escapes that: something breaks badly enough to abort the
+    whole turn. Before this, anyone reviewing the session afterward — Monitor's Playground,
+    `inta replay`, a reopened tab — saw nothing wrong, just an abrupt stop with no explanation.
+
+    Best-effort and defensive on purpose: `engine`/`graph` can legitimately still be None if
+    construction itself failed before either was assigned, and a failure while trying to persist
+    this (e.g. the checkpoint backend is what's actually down) must never mask the original error
+    from reaching the caller through the existing SSE/HTTPException paths — it's only ever logged,
+    never re-raised."""
+    if engine is None or graph is None:
+        return
+    try:
+        summary = str(error)
+        if len(summary) > 500:
+            summary = summary[:500] + "... (truncated — see server logs for the full error)"
+        engine.messages.append(
+            {
+                "role": "assistant",
+                "content": (
+                    f"⚠️ This request could not be completed due to an unexpected error: "
+                    f"{summary}\n\nPlease try again."
+                ),
+            }
+        )
+        engine._save_checkpoint()
+        await engine._await_last_checkpoint()
+    except Exception as record_error:
+        Tracer.log_error(f"Failed to persist turn-failure record: {record_error}")
+
+
 def _check_approval_satisfied(
     pending_action: dict, approver_id: str | None
 ) -> tuple[bool, list[str] | None, list[str]]:
@@ -640,6 +678,7 @@ async def chat_endpoint(req: ChatRequest, user_context: str = Depends(verify_aut
                 graph, project_dir, engine, "/chat", namespaced_session,
                 "error", str(e), _pre_metrics, _run_start,
             )
+        await _record_turn_failure(engine, graph, e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -735,6 +774,7 @@ async def chat_stream_endpoint(
                 graph, project_dir, engine, "/chat/stream", namespaced_session,
                 "error", str(e), _pre_metrics, _run_start,
             )
+            await _record_turn_failure(engine, graph, e)
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
         finally:
             lock.release()
@@ -1037,6 +1077,7 @@ async def stream_endpoint(req: ChatRequest, user_context: str = Depends(verify_a
                 graph, project_dir, engine, "/stream", namespaced_session,
                 "error", str(e), _pre_metrics, _run_start,
             )
+            await _record_turn_failure(engine, graph, e)
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
         finally:
             lock.release()

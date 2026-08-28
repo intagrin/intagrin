@@ -103,3 +103,14 @@ runs, searchable by session id/endpoint/status/error). Since the Agent Playgroun
 `/api/chat`/`/api/stream`/`/api/resume` proxy directly to these same endpoints, Playground-driven
 runs show up here too — one place to see everything that actually hit the engine, however it was
 triggered.
+
+**An unhandled mid-turn exception is also written into the conversation itself**, not just this
+audit table — a normal tool-execution error (a rate limit, a bad argument) is already caught
+inside the turn loop and turned into a visible tool-result message the agent gets to respond to,
+but something rarer that breaks the whole turn (a bug, a checkpoint backend outage, an LLM API
+failure outside the turn loop's own narrower handling) used to vanish from the session's own
+history entirely — visible only in this Logs tab, and only if someone thought to check it. All
+three chat endpoints now append a clear `"⚠️ This request could not be completed..."` message to
+the checkpointed conversation and save it before returning the error, so reviewing the session
+later — Monitor's Playground, `inta replay`, a reopened tab — shows what happened instead of a
+silent stop.
