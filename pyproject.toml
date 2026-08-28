@@ -47,7 +47,7 @@ inta = "intagrin.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"*" = ["*.html", "*.jinja2", "*.png", "*.css", "*.js", "*.svg", "templates/*", "templates/copilot/*.md", "templates/copilot/frontmatter/*.md", "templates/copilot/docs/*.md", "static/*", "static/assets/*"]
+"*" = ["*.html", "*.jinja2", "*.png", "*.css", "*.js", "*.svg", "templates/*", "templates/copilot/*.md", "templates/copilot/frontmatter/*.md", "templates/copilot/docs/*.md", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
