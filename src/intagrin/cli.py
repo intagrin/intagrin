@@ -67,6 +67,12 @@ def _prompt_for_llm_model(project_dir: Path | None = None) -> str:
     can't enumerate — any other provider, any self-hosted/local endpoint — as a raw LiteLLM model
     string, so this never gates what a user can actually run on.
 
+    Every choice ends the same way: a suggested default model the user can accept by pressing
+    Enter, or type over with any other model from that same provider. Picking "OpenAI" used to
+    hard-lock you to gpt-4o specifically with no way to get gpt-4o-mini/o1/anything else short of
+    going around it via "Custom" — the model choice was never actually the user's to make for the
+    three key-based providers, only for the two local ones, which already prompted this way.
+
     A freshly-collected API key is set in os.environ for this process AND, when project_dir is
     given, appended to that project's .env so it's still there on the next run — appended, not
     written outright, so this can never silently wipe out other vars already in an existing .env
@@ -74,7 +80,7 @@ def _prompt_for_llm_model(project_dir: Path | None = None) -> str:
     from rich.prompt import IntPrompt, Prompt
 
     console.print("\n[bold cyan]Which LLM provider?[/bold cyan]")
-    console.print("  [1] OpenAI (GPT-4o)")
+    console.print("  [1] OpenAI")
     console.print("  [2] Google Gemini")
     console.print("  [3] Anthropic Claude")
     console.print("  [4] Ollama (local)")
@@ -85,21 +91,30 @@ def _prompt_for_llm_model(project_dir: Path | None = None) -> str:
         "\nChoose a provider", choices=["1", "2", "3", "4", "5", "6"], default=1
     )
 
-    def _collect_key(prompt: str, env_var: str, model_str: str) -> str:
-        key = Prompt.ask(prompt, password=True)
+    def _collect_key_then_model(
+        key_prompt: str, env_var: str, provider_label: str, default_model: str
+    ) -> str:
+        key = Prompt.ask(key_prompt, password=True)
         os.environ[env_var] = key
         if project_dir is not None:
             with open(project_dir / ".env", "a") as f:
                 f.write(f"{env_var}={key}\n")
-        return model_str
+        return Prompt.ask(f"{provider_label} model", default=default_model)
 
     if choice == 1:
-        return _collect_key("Enter your OpenAI API Key", "OPENAI_API_KEY", "openai/gpt-4o")
+        return _collect_key_then_model(
+            "Enter your OpenAI API Key", "OPENAI_API_KEY", "OpenAI", "openai/gpt-4o"
+        )
     if choice == 2:
-        return _collect_key("Enter your Gemini API Key", "GEMINI_API_KEY", "gemini/gemini-2.5-flash")
+        return _collect_key_then_model(
+            "Enter your Gemini API Key", "GEMINI_API_KEY", "Gemini", "gemini/gemini-2.5-flash"
+        )
     if choice == 3:
-        return _collect_key(
-            "Enter your Anthropic API Key", "ANTHROPIC_API_KEY", "anthropic/claude-sonnet-4-5"
+        return _collect_key_then_model(
+            "Enter your Anthropic API Key",
+            "ANTHROPIC_API_KEY",
+            "Anthropic",
+            "anthropic/claude-sonnet-4-5",
         )
     if choice == 4:
         return Prompt.ask("Enter your Ollama model name", default="ollama/llama3")

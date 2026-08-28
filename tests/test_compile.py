@@ -383,11 +383,41 @@ def test_compile_command_prompts_interactively_when_nothing_to_infer_from(tmp_pa
 
     monkeypatch.setattr(litellm, "completion", mock_completion)
 
-    # Provider menu choice "1" (OpenAI), then the API key prompt.
-    result = runner.invoke(app, ["compile", "blueprint.md"], input="1\nsk-test-not-real\n")
+    # Provider menu choice "1" (OpenAI), then the API key prompt, then the model prompt —
+    # accepted with an empty line, i.e. the suggested default.
+    result = runner.invoke(app, ["compile", "blueprint.md"], input="1\nsk-test-not-real\n\n")
 
     assert result.exit_code == 0, result.stdout
     assert seen_models == ["openai/gpt-4o"]
     assert os.environ.get("OPENAI_API_KEY") == "sk-test-not-real"
     # The freshly-collected key must be persisted for next time, not just this process.
     assert "OPENAI_API_KEY=sk-test-not-real" in (tmp_path / ".env").read_text()
+
+
+def test_compile_command_interactive_prompt_lets_you_override_the_suggested_model(
+    tmp_path, monkeypatch
+):
+    """The actual point of the model sub-prompt: picking a provider must not lock you into one
+    specific model from it. gpt-4o is only offered as a *default* — typing a different model for
+    the same provider (e.g. a cheaper/faster variant) must be honored, not silently ignored."""
+    monkeypatch.chdir(tmp_path)
+    bp = tmp_path / "blueprint.md"
+    bp.write_text("# Vision\nCreate a triage and support agent.")
+
+    seen_models = []
+
+    def mock_completion(*args, **kwargs):
+        seen_models.append(kwargs.get("model"))
+        return _MockResponse(json.dumps(VALID_MINIMAL_CONFIG))
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "completion", mock_completion)
+
+    # Provider "1" (OpenAI), a key, then an explicit model that is NOT the suggested default.
+    result = runner.invoke(
+        app, ["compile", "blueprint.md"], input="1\nsk-test-not-real\nopenai/gpt-4o-mini\n"
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert seen_models == ["openai/gpt-4o-mini"]

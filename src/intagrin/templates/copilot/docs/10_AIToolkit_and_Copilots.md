@@ -29,7 +29,7 @@ If you prefer CI/CD or terminal workflows, you can bypass the IDE agent and use 
 
 1. **`--model`/`-m`**, if you pass it — always wins, and is the one to use for CI/CD or any other non-interactive run: `inta compile blueprint.md --model openai/gpt-4o`.
 2. **The project's own `model.primary`**, if `ai.yaml` already exists — re-compiling an existing project's blueprint reuses whatever provider it's already configured with, rather than silently switching to a different one for just this call.
-3. **An interactive prompt**, only for a first-ever compile with neither of the above — asks which provider (OpenAI, Gemini, Anthropic, a local Ollama/Llama.cpp model, or any other LiteLLM model string), then the API key if that provider needs one. The key is both set for this run and appended to a `.env` next to `blueprint.md`, so you're not asked again next time.
+3. **An interactive prompt**, only for a first-ever compile with neither of the above — asks which provider (OpenAI, Gemini, Anthropic, a local Ollama/Llama.cpp model, or any other LiteLLM model string), then the API key if that provider needs one. For OpenAI/Gemini/Anthropic, a follow-up prompt then offers a sensible default model (e.g. `openai/gpt-4o`) that you're free to type over with any other model from that same provider — picking a provider is never a commitment to one specific model from it. The key is both set for this run and appended to a `.env` next to `blueprint.md`, so you're not asked again next time.
 
 Whichever way the model gets resolved, a missing API key fails fast with a clear `IG-CLI-008` error rather than a raw stack trace.
 ```bash
