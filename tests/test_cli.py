@@ -308,3 +308,48 @@ def test_new_rejects_an_unrecognized_template_value(tmp_path):
     assert result.exit_code != 0
     assert "bogus" in result.output
     assert not project_dir.exists()
+
+
+def test_new_withagent_end_to_end_through_the_interactive_provider_picker(tmp_path):
+    """run_agent_wizard (the --withagent path) has no other test exercising its actual
+    interactive prompt sequence — every other wizard test calls
+    _generate_and_validate_wizard_config directly, bypassing the picker entirely. This is the one
+    test that would have caught the picker's own refactor breaking (the removed api_key/provider
+    variables, the new model sub-prompt needing an extra line of input) rather than just the
+    LLM-call/validation logic downstream of it."""
+    project_dir = tmp_path / "withagent-demo"
+    valid_json = json.dumps(
+        {
+            "ai_yaml": (
+                'version: "1.0"\nname: "demo"\ndefault_agent: "triage"\n'
+                'model:\n  primary: "mock/model"\nmemory:\n  type: "sqlite"\n'
+                "agents:\n  triage: {}\n"
+            ),
+            "custom_tools_py": "# nothing yet",
+        }
+    )
+    seen_models = []
+
+    def mock_completion(*args, **kwargs):
+        seen_models.append(kwargs.get("model"))
+        return _mock_completion_response(valid_json)
+
+    with patch("litellm.completion", side_effect=mock_completion):
+        # Provider "1" (OpenAI) -> API key -> model sub-prompt (accept the default) -> the idea.
+        result = runner.invoke(
+            app,
+            ["new", str(project_dir), "--withagent"],
+            input="1\nsk-test-not-real\n\nA demo triage bot\n",
+        )
+
+    assert result.exit_code == 0, result.output
+    assert seen_models == ["openai/gpt-4o"]
+    # Must be the AI-generated config, not the exception-fallback default template — an earlier
+    # draft of this test passed even against a reintroduced bug because both paths satisfy
+    # "ai.yaml exists" and the .env write (now done earlier, inside the picker itself) happens
+    # regardless of what fails afterward. The generated project's actual name is the one thing
+    # only the real path produces.
+    assert "Project generated successfully via AI!" in result.output
+    assert "Falling back to default template" not in result.output
+    assert 'name: "demo"' in (project_dir / "ai.yaml").read_text()
+    assert "OPENAI_API_KEY=sk-test-not-real" in (project_dir / ".env").read_text()
