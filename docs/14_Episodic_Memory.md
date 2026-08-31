@@ -30,13 +30,36 @@ episodic_memory:
 Setting `episodic_memory:` auto-registers two tools on every agent — the same "presence triggers
 registration" pattern `rag:` uses for `search_knowledge_base`:
 
-- **`remember_episode(event_type, content, tags=None)`** — records one event. `event_type` is a
-  short label you choose (e.g. `"preference"`, `"failure"`, `"booking"`) used later to filter
-  `recall_episodes`. `tags` are optional free-form labels for finer-grained filtering.
+- **`remember_episode(event_type, content, tags=None, importance=None)`** — records one event.
+  `event_type` is a short label you choose (e.g. `"preference"`, `"failure"`, `"booking"`) used
+  later to filter `recall_episodes`. `tags` are optional free-form labels for finer-grained
+  filtering. `importance` is an optional 1-10 self-rating (clamped server-side) of how
+  significant the episode is — 1 for a mundane detail, 10 for something that should heavily
+  influence future behavior; omitted, it's treated as moderately important (5/10) rather than
+  penalized.
 - **`recall_episodes(query=None, event_type=None, tags=None, limit=None)`** — recalls previously
   recorded episodes. Omit `query` for a cheap structured lookup by `event_type`/`tags`/recency
-  alone (no embedding call); pass `query` for embedding-based semantic similarity search over
-  episode content. `tags`, if given, requires every tag to be present (AND, not OR).
+  alone (no embedding call); pass `query` for a ranked semantic search over episode content.
+  `tags`, if given, requires every tag to be present (AND, not OR).
+
+### Ranking: relevance, recency, and importance together
+
+A `query`-based `recall_episodes` doesn't rank by raw semantic similarity alone — that would let
+a technically-closer match from months ago permanently outrank something more recent and just as
+relevant, since embedding similarity has no sense of time or significance on its own. Instead
+(the same three-factor design [Park et al.'s "Generative Agents"](https://arxiv.org/abs/2304.03442)
+memory stream uses), each candidate episode is scored as the average of three signals, each
+normalized to `[0, 1]`:
+
+- **relevance** — cosine similarity to `query`.
+- **recency** — exponential decay from `created_at` (~0.995 per day; a month-old episode still
+  keeps ~86% of its recency score, a year-old one ~16% — gentle by design, since these episodes
+  are meant to matter for a production assistant's whole retention window, not one simulated day).
+- **importance** — the episode's own `remember_episode` rating (unrated episodes score a neutral
+  0.5).
+
+This only changes *ranking order* among candidates that already passed the `event_type`/`tags`
+filters — it never surfaces an episode that wouldn't otherwise match your query.
 
 ## Scope
 
@@ -57,8 +80,21 @@ Unlike `shared_memory`'s single row per scope (last-write-wins), the `episodes` 
 **append-only**: `remember_episode` always inserts a new row, so nothing is ever silently
 overwritten.
 
-## Limitations
+## Retention
 
-There is no retention or pruning policy in this version — episodes accumulate indefinitely for a
-scope. For a long-running, high-frequency use of `remember_episode`, plan for unbounded row growth
-the same way you would for any other unbounded application table.
+By default, episodes accumulate indefinitely — the same unbounded-append-only growth as any other
+application table with no cleanup. Set `episodic_memory.retention_days` to bound it:
+
+```yaml
+episodic_memory:
+  retention_days: 90   # rows older than this are eventually deleted; None (default) keeps everything
+```
+
+Pruning is opportunistic rather than a scheduled job: a small random fraction of `remember_episode`
+calls also run a single indexed `DELETE ... WHERE created_at < cutoff`, table-wide (not scoped to
+one `scope_key` — retention is a single project-wide policy). This keeps the amortized cost on the
+hot write path negligible without needing external cron infrastructure, at the cost of pruning
+happening "eventually" rather than exactly at the retention boundary — fine for a housekeeping
+policy, not a guarantee. `memory.run_log_retention_days` (see
+[04_Production_Deployment.md](04_Production_Deployment.md)) works identically for the separate
+`run_logs` audit table.

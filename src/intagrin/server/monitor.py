@@ -14,12 +14,16 @@ from rich.console import Console
 from ..compiler.parser import parse_project
 from ..config.orchestration_guide import GUIDE as ORCHESTRATION_GUIDE
 from ..errors import IntaGrinError
-from ..runtime.memory import postgres_connect, postgres_dict_cursor
+from ..runtime.memory import pooled_postgres_connection, postgres_dict_cursor
 from ..runtime.run_logger import ensure_schema
 from ..tracing.console import Tracer
 from .api import ChatRequest as APIChatRequest
 from .api import ResumeRequest, chat_endpoint, resume_endpoint, stream_endpoint
 from .error_handlers import register_intagrin_error_handlers
+
+# pooled_postgres_connection raises IntaGrinError, not ImportError, when neither psycopg driver
+# is installed — see run_logger.py's identical _NO_DRIVER_ERRORS for the full explanation.
+_NO_DRIVER_ERRORS = (ImportError, IntaGrinError)
 
 console = Console()
 app = FastAPI(title="IntaGrin Monitor Dashboard")
@@ -946,8 +950,7 @@ def get_memory(user_context: str = Depends(verify_monitor_auth)):
                 return []
                 
             try:
-                conn = postgres_connect(conn_url)
-                with conn:
+                with pooled_postgres_connection(conn_url) as conn:
                     with postgres_dict_cursor(conn) as cursor:
                         cursor.execute(
                             "SELECT session_id, messages, state FROM checkpoints "
@@ -968,7 +971,7 @@ def get_memory(user_context: str = Depends(verify_monitor_auth)):
                             except Exception:
                                 pass
                         return sessions
-            except ImportError:
+            except _NO_DRIVER_ERRORS:
                 return []
         
         elif graph.config.memory.type == "custom" and graph.config.memory.custom_module:
@@ -1047,9 +1050,7 @@ def get_logs(user_context: str = Depends(verify_monitor_auth)):
             ensure_schema(mem_cfg, project_dir)
 
             try:
-                conn = postgres_connect(conn_url)
-
-                with conn, postgres_dict_cursor(conn) as cursor:
+                with pooled_postgres_connection(conn_url) as conn, postgres_dict_cursor(conn) as cursor:
                     cursor.execute(
                         "SELECT * FROM run_logs WHERE session_id LIKE %s "
                         "ORDER BY created_at DESC LIMIT 200",
@@ -1061,7 +1062,7 @@ def get_logs(user_context: str = Depends(verify_monitor_auth)):
                             f"{user_context}:", "", 1
                         )
                         logs.append(d)
-            except ImportError:
+            except _NO_DRIVER_ERRORS:
                 return []
 
         return logs

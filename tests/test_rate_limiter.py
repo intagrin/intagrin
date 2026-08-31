@@ -14,6 +14,9 @@ def _sqlite_mem_cfg():
     cfg = MagicMock()
     cfg.type = "sqlite"
     cfg.db_path = None
+    # See test_run_logs.py's identical comment: a bare MagicMock attribute is truthy, which
+    # would make record_run_log's opportunistic pruning think retention is configured.
+    cfg.run_log_retention_days = None
     return cfg
 
 
@@ -128,5 +131,23 @@ def test_fails_open_when_the_audit_db_is_unreachable(tmp_path):
         "intagrin.runtime.rate_limiter.ensure_schema", side_effect=OSError("disk full")
     ), patch("intagrin.runtime.rate_limiter.Tracer.log_error") as mock_log_error:
         check_rate_limit(_sqlite_mem_cfg(), tmp_path, "tenant", rate_cfg)
+
+    mock_log_error.assert_called_once()
+
+
+def test_fails_open_on_a_non_breach_intagrin_error_not_misreported_as_a_rate_limit(tmp_path):
+    """Regression test: pooled_postgres_connection (runtime/memory.py) raises IntaGrinError
+    ("IG-RT-004", missing psycopg driver) instead of a plain ImportError. check_rate_limit's own
+    breach signal is also an IntaGrinError ("IG-RT-008") — catching IntaGrinError by class alone
+    would re-raise a missing-driver infra error as if it were a 429 rate-limit rejection. Only
+    IG-RT-008 may propagate; anything else, including this one, must fail open exactly like an
+    OSError does above."""
+    rate_cfg = RateLimitConfig(max_requests_per_window=1)
+
+    with patch(
+        "intagrin.runtime.rate_limiter.ensure_schema",
+        side_effect=IntaGrinError("IG-RT-004", "PostgreSQL driver not installed"),
+    ), patch("intagrin.runtime.rate_limiter.Tracer.log_error") as mock_log_error:
+        check_rate_limit(_sqlite_mem_cfg(), tmp_path, "tenant", rate_cfg)  # must not raise
 
     mock_log_error.assert_called_once()

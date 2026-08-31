@@ -17,6 +17,7 @@ Canonical `tests/evals.yaml` shape:
             criteria: "..."
 """
 
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +50,11 @@ class EvalCaseResult:
     starting_agent: str
     final_agent: str = ""
     called_tools: list[str] = field(default_factory=list)
+    # (tool_name, json.dumps(args, sort_keys=True)) per call, in call order — lets icu.py detect
+    # an agent redoing the exact same call within one case (a context-distraction proxy), which
+    # a bare tool-name list can't distinguish from legitimately calling the same tool twice with
+    # different arguments.
+    tool_call_log: list[tuple[str, str]] = field(default_factory=list)
     tool_error_count: int = 0
     final_answer: str = ""
     tokens: int = 0
@@ -96,6 +102,17 @@ async def run_case(
 
     result.final_agent = engine.active_agent_name
     result.called_tools = [m.get("name") for m in engine.messages if m.get("role") == "tool"]
+    for m in engine.messages:
+        if m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function", {})
+            raw_args = fn.get("arguments", "{}")
+            try:
+                normalized_args = json.dumps(json.loads(raw_args), sort_keys=True)
+            except (TypeError, ValueError):
+                normalized_args = str(raw_args)
+            result.tool_call_log.append((fn.get("name", ""), normalized_args))
     result.tool_error_count = sum(
         1
         for m in engine.messages
@@ -129,3 +146,53 @@ async def run_case(
     result.reasons = reasons
     result.deterministic_pass = not reasons
     return result
+
+
+@dataclass
+class RoutingAccuracy:
+    """Aggregate routing-correctness summary over a batch of eval cases that set
+    `expected_agent` — see compute_routing_accuracy. `semantic_total`/`semantic_correct` are the
+    subset whose `starting_agent` has `auto_route: true`: the specific number this framework
+    doesn't currently have any other way to measure. A prerequisite baseline for ever considering
+    replacing auto_route's LLM-based routing decision (runtime/router.py's
+    evaluate_semantic_routing) with a cheaper heuristic (e.g. an embedding-similarity gate, the
+    same fast-path pattern already applied to lazy_load_tools) — that swap must not regress this
+    number, and there was previously no way to even know what "this number" was."""
+
+    total: int = 0
+    correct: int = 0
+    semantic_total: int = 0
+    semantic_correct: int = 0
+
+    @property
+    def accuracy(self) -> float | None:
+        return (self.correct / self.total) if self.total else None
+
+    @property
+    def semantic_accuracy(self) -> float | None:
+        return (self.semantic_correct / self.semantic_total) if self.semantic_total else None
+
+
+def compute_routing_accuracy(
+    graph: ExecutionGraph, cases: list[dict[str, Any]], results: list[EvalCaseResult]
+) -> RoutingAccuracy:
+    """Aggregates over every case that set `expected_agent`, in the same order as `cases`/
+    `results` (both produced by iterating the same case list — callers must not reorder one
+    without the other). A case's `starting_agent` counts toward the `semantic_*` subset when that
+    agent has `auto_route: true` — a reasonable proxy for "semantic routing decided this," since
+    eval cases are single-hop probes (one starting agent, one message) by convention, not
+    multi-turn transcripts where routing could span several agents."""
+    acc = RoutingAccuracy()
+    for case, result in zip(cases, results):
+        expected_agent = case.get("expected_agent")
+        if not expected_agent:
+            continue
+        is_correct = result.final_agent == expected_agent
+        acc.total += 1
+        acc.correct += int(is_correct)
+
+        starting_cfg = graph.config.agents.get(result.starting_agent)
+        if starting_cfg is not None and getattr(starting_cfg, "auto_route", False):
+            acc.semantic_total += 1
+            acc.semantic_correct += int(is_correct)
+    return acc

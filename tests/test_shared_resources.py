@@ -117,7 +117,7 @@ def test_initialize_connects_mcp_servers_concurrently_not_sequentially():
         graph = ExecutionGraph(config, {})
         engine = RuntimeEngine(graph, Path.cwd())
 
-        async def slow_connect(self, server_name, command, args):
+        async def slow_connect(self, server_name, command, args, env=None):
             await asyncio.sleep(0.2)
             self.sessions[server_name] = object()
             self.tool_mappings[f"{server_name}_tool"] = server_name

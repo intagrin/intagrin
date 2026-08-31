@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import litellm
+from rich.console import Console
 from rich.prompt import Prompt
 
 from intagrin.compiler.parser import ExecutionGraph
@@ -16,6 +17,7 @@ from intagrin.config.schema import (
     MCPToolConfig,
     OpenAPIToolConfig,
     SandboxToolConfig,
+    SkillConfig,
     ToolReferenceConfig,
     VoteConfig,
 )
@@ -28,6 +30,24 @@ from intagrin.runtime.shared_resources import SharedResources
 from intagrin.runtime.tool_runner import ToolRunner
 from intagrin.runtime.tools_loader import get_tool_schema, load_local_tool
 from intagrin.tracing.console import EventStreamer, Tracer, set_trace_context
+
+MOCK_MODEL_PREFIX = "mock/"
+
+console = Console()
+
+
+def _mock_reply(last_user_msg: str) -> str:
+    """Deterministic offline reply for `model.primary`/`model_override: "mock/..."` — lets
+    `inta dev` (and `--once`) run the full chat loop end-to-end with zero API key and zero
+    network calls, so a first-time user can see the wiring work before configuring a real
+    model. Plain text only, on purpose: it never calls a tool or claims to be a real model's
+    output, so it can't be mistaken for the swarm actually functioning."""
+    return (
+        "[IntaGrin mock model — no LLM was called, no API key needed]\n"
+        f"You said: {last_user_msg!r}\n"
+        'Set model.primary (or an agent\'s model_override) to a real LiteLLM model id, e.g. '
+        '"openai/gpt-4o-mini", in ai.yaml to talk to an actual model.'
+    )
 
 
 async def load_openapi_tools(
@@ -243,6 +263,16 @@ class RuntimeEngine:
             self.state["_active_agent_name"] = graph.config.default_agent
         # tool name -> {"required_approvals": int, "required_approvers": list[str] | None}
         self.tools_requiring_approval: dict[str, dict] = {}
+        # MCP server name (an MCPToolConfig entry's own `name`) -> its max_task_wait_seconds,
+        # consulted by check_mcp_task_status when deciding whether a still-pending claimed task
+        # has been running too long. None (the dict-get default) means no cap.
+        self.mcp_task_wait_seconds: dict[str, int | None] = {}
+        # Claimed (long-running) MCP tasks awaiting completion — see check_mcp_task_status.
+        # task_id -> {"tool", "server", "created_at", "tool_call_id"}. A plain ride-along dict on
+        # state (checkpointed with everything else), not a new table: the task itself lives on
+        # the MCP server, not this process, so recovering a crashed session just means offering
+        # check_mcp_task_status again next turn — nothing to reconcile locally.
+        self.state.setdefault("_pending_mcp_tasks", {})
         # name -> callable, loaded in initialize() from AppConfig.condition_functions — the
         # closed whitelist safe_eval's `functions` param resolves a routers[]/available_when
         # call expression's function name against. Never mutated after initialize().
@@ -253,6 +283,24 @@ class RuntimeEngine:
         # same recent trajectory reuses the prior selection instead of re-querying the router
         # model. See ToolRunner.get_active_tools.
         self._tool_selection_cache: tuple | None = None
+        # embedding_model -> tool-name-tuple -> {tool_name: embedding}. Tool schemas are static
+        # within a session, so ToolRunner._select_tools_by_embedding computes each tool's
+        # embedding once and reuses it every turn instead of re-embedding an unchanged tool set.
+        self._tool_embedding_cache: dict[str, dict[tuple, dict[str, list]]] = {}
+
+        # Fire-and-forget asyncio.create_task() results from _compress_error_loops' reflection
+        # write must be kept referenced somewhere — the event loop only holds a weak reference to
+        # a bare create_task() result, so an unreferenced task can be garbage-collected mid-flight
+        # (a documented asyncio gotcha, not hypothetical). Each task removes itself via
+        # add_done_callback once it finishes; unlike _pending_checkpoint_task these don't need to
+        # be chained in order, since remember_episode writes are independent append-only rows.
+        self._pending_reflection_tasks: set = set()
+
+        # Running count of entries ever trimmed from state["_router_trace"]'s 50-entry ring
+        # buffer — lets _drive_turns_until_settled's since_index (an absolute position captured
+        # before the trace could be trimmed) stay correct even if _record_router_trace trims the
+        # list out from under it mid-turn. See _print_new_router_trace.
+        self._router_trace_trimmed = 0
 
         # The most recently scheduled _save_checkpoint background task, if any — see
         # _save_checkpoint's own docstring for why every call chains onto this instead of firing
@@ -269,6 +317,16 @@ class RuntimeEngine:
         if self.graph.config.telemetry:
             litellm.success_callback = self.graph.config.telemetry
             litellm.failure_callback = self.graph.config.telemetry
+
+        # LiteLLM's own hook (litellm/integrations/anthropic_cache_control_hook.py) auto-injects
+        # cache_control breakpoints on the system prompt + trailing turn, but only for
+        # Anthropic/Bedrock Claude models that report prompt-caching support, and only when the
+        # request doesn't already carry client-supplied cache_control — a no-op for every other
+        # provider, so this is safe to set unconditionally rather than needing per-model detection
+        # here. Process-global like the telemetry callbacks just above (same pre-existing
+        # limitation: the last RuntimeEngine constructed in a process wins if two concurrently
+        # loaded projects disagree — not new to this setting).
+        litellm.enable_anthropic_prompt_caching = self.graph.config.model.enable_prompt_caching
 
         from .memory import build_checkpointer
 
@@ -311,6 +369,7 @@ class RuntimeEngine:
             agent_prompts=self.agent_prompts,
             tools_requiring_approval=self.tools_requiring_approval,
             untrusted_tools=self.untrusted_tools,
+            mcp_task_wait_seconds=self.mcp_task_wait_seconds,
         )
 
     async def _load_tool_config(self, tool_cfg, agent_name: str | None = None):
@@ -342,7 +401,10 @@ class RuntimeEngine:
             Tracer.log_step("Setup", f"Connecting to MCP server {label}...")
             try:
                 await self.mcp_manager.connect(
-                    tool_cfg.name, tool_cfg.command, tool_cfg.args
+                    tool_cfg.name, tool_cfg.command, tool_cfg.args, getattr(tool_cfg, "env", None)
+                )
+                self.mcp_task_wait_seconds[tool_cfg.name] = getattr(
+                    tool_cfg, "max_task_wait_seconds", None
                 )
                 schemas = await self.mcp_manager.get_server_tool_schemas(tool_cfg.name)
                 self.global_tool_schemas.extend(schemas)
@@ -541,13 +603,19 @@ class RuntimeEngine:
         return f"session:{self.session_id}"
 
     async def remember_episode(
-        self, event_type: str, content: str, tags: list[str] | None = None
+        self,
+        event_type: str,
+        content: str,
+        tags: list[str] | None = None,
+        importance: int | None = None,
     ) -> str:
         """Record a discrete event to episodic memory: a structured, individually queryable fact
         (e.g. "user prefers window seats", "booking BK-4471 failed: card declined"), distinct
-        from the single blended long_term_memory summary. event_type is a short label you choose
-        (e.g. "preference", "failure", "booking") used later to filter recall_episodes. tags are
-        optional free-form labels for finer-grained filtering.
+        from the single blended long_term_memory summary.
+
+        event_type: a short label you choose (e.g. "preference", "failure", "booking"), used later to filter recall_episodes.
+        tags: optional free-form labels for finer-grained filtering.
+        importance: optional 1-10 rating of how significant this episode is to remember later — 1 for a purely mundane detail, 10 for something that should heavily influence future behavior (a hard constraint, a serious failure, a strong stated preference). Omit it if unsure; an unrated episode is still recalled, just treated as moderately important rather than ranked to the bottom.
         """
         ep_cfg = self.graph.config.episodic_memory
         if not ep_cfg:
@@ -567,6 +635,8 @@ class RuntimeEngine:
             content,
             tags,
             embedding,
+            importance,
+            ep_cfg.retention_days,
         )
         return f"Recorded episode ({event_type}): {content}"
 
@@ -577,10 +647,14 @@ class RuntimeEngine:
         tags: list[str] | None = None,
         limit: int | None = None,
     ) -> str:
-        """Recall previously recorded episodic events. query (optional) does embedding-based
-        semantic similarity search over episode content; omit it for a cheap structured lookup by
-        event_type/tags/recency alone, with no embedding call. tags (if given) requires every tag
-        to be present (AND, not OR).
+        """Recall previously recorded episodic events, most relevant/recent/important first.
+        query (optional) does embedding-based search over episode content, ranked by a blend of
+        relevance to your query, recency, and each episode's own importance rating (see
+        remember_episode) — not relevance alone, so a barely-more-similar episode from months ago
+        doesn't automatically outrank something more recent and just as relevant. Omit query for
+        a cheap structured lookup by event_type/tags/recency alone, with no embedding call and no
+        importance/recency blending. tags (if given) requires every tag to be present (AND, not
+        OR).
         """
         ep_cfg = self.graph.config.episodic_memory
         if not ep_cfg:
@@ -686,6 +760,13 @@ class RuntimeEngine:
             if callbacks:
                 litellm.success_callback = callbacks
                 litellm.failure_callback = callbacks
+            # Additive to litellm's own "otel" callback above (which only instruments litellm's
+            # LLM API calls) — starts a separate background consumer that maps IntaGrin's own
+            # tool/router/handoff/spawn/MCP-task events onto OTel GenAI-semconv spans. See
+            # tracing/otel_exporter.py for why these are deliberately not merged into one span tree.
+            from ..tracing.otel_exporter import ensure_started as _ensure_otel_exporter_started
+
+            _ensure_otel_exporter_started(telemetry_options)
 
         if self._shared_resources is not None:
             # Reuse pooled MCP connections/RAG index/tool schemas/prompts instead of rebuilding
@@ -699,6 +780,7 @@ class RuntimeEngine:
             self.agent_prompts = sr.agent_prompts
             self.tools_requiring_approval = sr.tools_requiring_approval
             self.untrusted_tools = sr.untrusted_tools
+            self.mcp_task_wait_seconds = sr.mcp_task_wait_seconds
             self.local_tools = dict(sr.local_tools)
             self.local_tools["read_state"] = self.read_state
             self.local_tools["write_state"] = self.write_state
@@ -859,6 +941,161 @@ class RuntimeEngine:
             )
             return False
 
+    def _resolve_available_skills(self, agent_cfg) -> list[SkillConfig]:
+        """Resolves agent_cfg.skills (bare names or SkillReferenceConfig entries) against the
+        root-level skills: list, filtering out any whose available_when condition doesn't
+        currently hold — same restricted grammar/fail-closed-on-error posture as
+        _tool_currently_available, reused via safe_eval rather than a second condition language.
+        A name with no matching root SkillConfig is silently skipped (defensive only: parse-time
+        validation in config/schema.py already guarantees every reference resolves)."""
+        root_skills = {s.name: s for s in self.graph.config.skills}
+        available: list[SkillConfig] = []
+        for ref in agent_cfg.skills:
+            name = ref if isinstance(ref, str) else ref.name
+            condition = None if isinstance(ref, str) else ref.available_when
+            skill_cfg = root_skills.get(name)
+            if skill_cfg is None:
+                continue
+            if condition:
+                try:
+                    if not safe_eval(condition, self.state, self._condition_functions):
+                        continue
+                except ValueError as e:
+                    if not str(e).startswith("Unknown variable:"):
+                        Tracer.log_error(
+                            f"available_when condition '{condition}' for skill '{name}' error: {e}"
+                        )
+                    continue
+                except Exception as e:
+                    Tracer.log_error(
+                        f"available_when condition '{condition}' for skill '{name}' error: {e}"
+                    )
+                    continue
+            available.append(skill_cfg)
+        return available
+
+    def _skill_content_path(self, skill_cfg: SkillConfig) -> Path:
+        return self.project_dir / skill_cfg.path
+
+    def _load_skill_content(self, agent_cfg, skill_name: str | None) -> str:
+        if not agent_cfg or not skill_name:
+            return "load_skill is not available."
+        skill_cfg = next(
+            (s for s in self._resolve_available_skills(agent_cfg) if s.name == skill_name), None
+        )
+        if skill_cfg is None:
+            return f"Skill '{skill_name}' is not available to this agent right now."
+        content_path = self._skill_content_path(skill_cfg)
+        if content_path.is_dir():
+            main_file = content_path / "SKILL.md"
+            if not main_file.is_file():
+                md_files = sorted(p for p in content_path.glob("*.md") if p.is_file())
+                if not md_files:
+                    return (
+                        f"Skill '{skill_name}' directory has no SKILL.md and no other .md file "
+                        "to load."
+                    )
+                main_file = md_files[0]
+            return main_file.read_text(encoding="utf-8")
+        if content_path.is_file():
+            return content_path.read_text(encoding="utf-8")
+        return f"Skill '{skill_name}' path does not exist on disk: {skill_cfg.path}"
+
+    def _read_skill_resource(
+        self, agent_cfg, skill_name: str | None, resource_path: str | None
+    ) -> str:
+        if not agent_cfg or not skill_name or not resource_path:
+            return "read_skill_resource is not available."
+        skill_cfg = next(
+            (s for s in self._resolve_available_skills(agent_cfg) if s.name == skill_name), None
+        )
+        if skill_cfg is None:
+            return f"Skill '{skill_name}' is not available to this agent right now."
+        skill_dir = self._skill_content_path(skill_cfg)
+        if not skill_dir.is_dir():
+            return (
+                f"Skill '{skill_name}' has no bundled resources — its content is a single file, "
+                "not a directory."
+            )
+        try:
+            skill_dir_resolved = skill_dir.resolve()
+            candidate = (skill_dir / resource_path).resolve()
+        except OSError as e:
+            return f"Could not resolve resource path '{resource_path}': {e}"
+        if not candidate.is_relative_to(skill_dir_resolved):
+            return (
+                f"resource_path '{resource_path}' escapes skill '{skill_name}'s own directory — "
+                "rejected."
+            )
+        if not candidate.is_file():
+            return f"Resource '{resource_path}' not found in skill '{skill_name}'."
+        return candidate.read_text(encoding="utf-8")
+
+    async def _check_mcp_task_status(self, task_id: str | None) -> str:
+        """Poll a claimed (long-running) MCP task started earlier in this session. Deliberately
+        never raises past this method — like load_skill/read_skill_resource above, it's dispatched
+        before execute_tool's try/except, so an error here is reported as a plain tool-result
+        string (prefixed with the IG-MCP-002 code, matching how IG-MCP-001 already surfaces
+        through the generic except-and-stringify path further down execute_tool) rather than
+        propagating as an exception."""
+        import datetime as _dt
+
+        pending: dict = self.state.get("_pending_mcp_tasks", {})
+        if not task_id:
+            return "check_mcp_task_status requires a task_id."
+        entry = pending.get(task_id)
+        if entry is None:
+            return f"No pending task with id '{task_id}' is tracked for this session."
+
+        server_name = entry["server"]
+        try:
+            status_result = await self.mcp_manager.get_task_status(server_name, task_id)
+        except Exception as e:
+            return f"[IG-MCP-002] Could not check task '{task_id}': {e}"
+
+        if status_result.status == "completed":
+            try:
+                payload = await self.mcp_manager.get_task_payload(server_name, task_id)
+            except Exception as e:
+                pending.pop(task_id, None)
+                return (
+                    f"[IG-MCP-002] Task '{task_id}' completed but its result could not be "
+                    f"retrieved: {e}"
+                )
+            pending.pop(task_id, None)
+            EventStreamer.emit(
+                "mcp_task_completed", {"task_id": task_id, "tool": entry["tool"], "status": "completed"}
+            )
+            return payload
+
+        if status_result.status in ("failed", "cancelled"):
+            pending.pop(task_id, None)
+            detail = status_result.status_message or status_result.status
+            EventStreamer.emit(
+                "mcp_task_completed",
+                {"task_id": task_id, "tool": entry["tool"], "status": status_result.status},
+            )
+            return (
+                f"[IG-MCP-002] Task '{task_id}' for '{entry['tool']}' ended with status "
+                f"'{status_result.status}': {detail}"
+            )
+
+        max_wait = self.mcp_task_wait_seconds.get(server_name)
+        if max_wait is not None:
+            created_at = _dt.datetime.fromisoformat(entry["created_at"])
+            elapsed = (_dt.datetime.now(_dt.UTC) - created_at).total_seconds()
+            if elapsed > max_wait:
+                pending.pop(task_id, None)
+                return (
+                    f"[IG-MCP-002] Task '{task_id}' for '{entry['tool']}' exceeded its "
+                    f"max_task_wait_seconds ({max_wait}s) — treating it as failed."
+                )
+
+        return (
+            f"Task '{task_id}' for '{entry['tool']}' is still {status_result.status}. "
+            "Check again on a later turn."
+        )
+
     async def _get_active_tools(self, agent_cfg) -> list[dict[str, Any]]:
         """Return only tools explicitly available to the active agent."""
         if not agent_cfg:
@@ -902,6 +1139,31 @@ class RuntimeEngine:
             )
             if matched_prefix and self._tool_currently_available(matched_prefix, agent_cfg):
                 schemas.append(schema)
+
+        if any(s["function"]["name"] in self.mcp_manager.tool_mappings for s in schemas):
+            schemas.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "check_mcp_task_status",
+                        "description": (
+                            "Check on a long-running MCP tool call you previously started "
+                            "(one whose result said 'still running' with a task id) — call this "
+                            "again on a later turn if it's still not done."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "task_id": {
+                                    "type": "string",
+                                    "description": "The task id returned when the original call started.",
+                                },
+                            },
+                            "required": ["task_id"],
+                        },
+                    },
+                }
+            )
 
         if agent_cfg.handoffs:
             schemas.append(
@@ -1037,6 +1299,71 @@ class RuntimeEngine:
                 }
             )
 
+        if agent_cfg.skills:
+            available_skills = self._resolve_available_skills(agent_cfg)
+            if available_skills:
+                skill_names = [s.name for s in available_skills]
+                schemas.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "load_skill",
+                            "description": (
+                                "Load the full instructions for one of your available Agent "
+                                "Skills — reusable domain guidance kept out of context until "
+                                "you decide you actually need it. Available skills:\n"
+                                + "\n".join(f"{s.name}: {s.description}" for s in available_skills)
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "enum": skill_names,
+                                        "description": "Name of the skill to load.",
+                                    },
+                                },
+                                "required": ["name"],
+                            },
+                        },
+                    }
+                )
+                if any(
+                    self._skill_content_path(s).is_dir() for s in available_skills
+                ):
+                    schemas.append(
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "read_skill_resource",
+                                "description": (
+                                    "Read a resource file bundled alongside a skill (only for "
+                                    "skills whose content is a directory, not a single file) — "
+                                    "use after load_skill if the skill's instructions reference "
+                                    "an additional file."
+                                ),
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "skill_name": {
+                                            "type": "string",
+                                            "enum": skill_names,
+                                            "description": "Name of the skill this resource belongs to.",
+                                        },
+                                        "resource_path": {
+                                            "type": "string",
+                                            "description": (
+                                                "Path to the resource file, relative to the "
+                                                "skill's own directory."
+                                            ),
+                                        },
+                                    },
+                                    "required": ["skill_name", "resource_path"],
+                                },
+                            },
+                        }
+                    )
+
         dynamic_self = self.state.get("_dynamic_agents", {}).get(self.active_agent_name)
         if dynamic_self:
             # When the spawning agent declared spawns.result_schema, return_to_creator's own
@@ -1150,6 +1477,14 @@ class RuntimeEngine:
             return agent_cfg.spawns is not None
         if name == "return_to_creator":
             return self.active_agent_name in self.state.get("_dynamic_agents", {})
+        if name in ("load_skill", "read_skill_resource"):
+            return bool(self._resolve_available_skills(agent_cfg))
+        if name == "check_mcp_task_status":
+            allowed_tools = {tool.name for tool in agent_cfg.tools}
+            return any(
+                server_name in allowed_tools
+                for server_name in self.mcp_manager.tool_mappings.values()
+            )
 
         allowed_tools = {tool.name for tool in agent_cfg.tools}
         if name in allowed_tools:
@@ -1729,6 +2064,25 @@ class RuntimeEngine:
             Tracer.log_tool_result(msg)
             return msg
 
+        if name == "load_skill":
+            agent_cfg = self._resolve_agent_cfg(self.active_agent_name)
+            result = self._load_skill_content(agent_cfg, args.get("name"))
+            Tracer.log_tool_result(result)
+            return result
+
+        if name == "read_skill_resource":
+            agent_cfg = self._resolve_agent_cfg(self.active_agent_name)
+            result = self._read_skill_resource(
+                agent_cfg, args.get("skill_name"), args.get("resource_path")
+            )
+            Tracer.log_tool_result(result)
+            return result
+
+        if name == "check_mcp_task_status":
+            result = await self._check_mcp_task_status(args.get("task_id"))
+            Tracer.log_tool_result(result)
+            return result
+
         try:
             if name in self.local_tools:
                 func = self.local_tools[name]
@@ -1747,7 +2101,27 @@ class RuntimeEngine:
                     self.state["_untrusted_content_ingested"] = True
                 return result
             else:
-                result = await self.mcp_manager.call_tool(name, args)
+                raw_result = await self.mcp_manager.call_tool(name, args)
+                if isinstance(raw_result, dict) and "_mcp_task" in raw_result:
+                    import datetime as _dt
+
+                    task_info = raw_result["_mcp_task"]
+                    task_id = task_info["task_id"]
+                    self.state.setdefault("_pending_mcp_tasks", {})[task_id] = {
+                        "tool": name,
+                        "server": task_info["server_name"],
+                        "created_at": _dt.datetime.now(_dt.UTC).isoformat(),
+                        "tool_call_id": tool_call_id,
+                    }
+                    EventStreamer.emit(
+                        "mcp_task_started", {"tool": name, "task_id": task_id}
+                    )
+                    result = (
+                        f"Task {task_id} started for '{name}'; it's still running in the "
+                        f"background. Call check_mcp_task_status('{task_id}') to check progress."
+                    )
+                else:
+                    result = raw_result
                 Tracer.log_tool_result(result)
                 self.state["_circuit_breakers"]["tool_failures"] = 0
                 if name in self.untrusted_tools:
@@ -1846,16 +2220,30 @@ class RuntimeEngine:
                     "answer": final_answer,
                     "state": branch_engine.state,
                     "pre_state": pre_state,
+                    # Only consumed by _run_debate_rounds (vote.debate_rounds > 1) — kept here
+                    # rather than only in that branch of code, so a single run_parallel_branch
+                    # definition serves both 'parallel' and every 'vote' shape.
+                    "subtask_name": subtask.name,
+                    "agent": subtask.agent,
+                    "engine": branch_engine,
                 }
 
             branch_results = await asyncio.gather(
                 *(run_parallel_branch(st) for st in task.tasks)
             )
 
+            if task_type == "vote":
+                vote_cfg = task.vote or VoteConfig()
+                if vote_cfg.debate_rounds > 1:
+                    branch_results = await self._run_debate_rounds(
+                        task, branch_results, vote_cfg.debate_rounds
+                    )
+
             # Apply Declarative State Reducers (same shared merge delegation uses — a branch
             # that changes a key with no declared reducer now merges back via default overwrite
             # too, instead of being silently dropped as it was before). Shared by both 'parallel'
-            # and 'vote' — only the final aggregation message differs between them.
+            # and 'vote' — only the final aggregation message differs between them. Uses each
+            # branch's FINAL state (after every debate round, if any ran), not just round one's.
             text_results = []
             for b_res in branch_results:
                 text_results.append(b_res["result"])
@@ -1887,6 +2275,60 @@ class RuntimeEngine:
                 await self._run_agent_turn()
                 if not self.is_transferring:
                     break
+
+    async def _run_debate_rounds(
+        self, task: Any, branch_results: list[dict], total_rounds: int
+    ) -> list[dict]:
+        """Multi-agent debate (Du et al., 2023): for `total_rounds - 1` additional rounds beyond
+        the initial independent answer already in `branch_results`, every branch is shown every
+        OTHER branch's current answer and asked to reconsider — its own isolated child engine
+        keeps running (a new user message appended to its existing conversation, not a fresh
+        engine), so it retains its own prior reasoning across rounds too, not just the others'
+        latest answers. Rounds run sequentially (each depends on the previous round's full set
+        of answers); branches within a round still run concurrently via asyncio.gather, same as
+        the initial round in _execute_task. Returns the branch_results list updated in place —
+        `answer`/`result`/`state` reflect the FINAL round, `pre_state`/`subtask_name`/`agent`/
+        `engine` carry over unchanged."""
+        import asyncio
+
+        for round_num in range(2, total_rounds + 1):
+            current_answers = {br["subtask_name"]: br["answer"] for br in branch_results}
+
+            async def run_revision(br):
+                others = "\n\n".join(
+                    f"- {name}: {answer}"
+                    for name, answer in current_answers.items()
+                    if name != br["subtask_name"]
+                )
+                revision_prompt = (
+                    f"Other participants' current answers to this same task:\n\n{others}\n\n"
+                    "Reconsider your own answer in light of theirs. If you're now convinced a "
+                    "different answer is more correct, revise yours accordingly; if you still "
+                    "believe your original answer is right, restate it and briefly say why."
+                )
+                engine = br["engine"]
+                engine.messages.append({"role": "user", "content": revision_prompt})
+                while True:
+                    engine.is_transferring = False
+                    await engine._run_agent_turn()
+                    if not engine.is_transferring:
+                        break
+                revised_answer = extract_final_answer(engine.messages)
+                return {
+                    **br,
+                    "answer": revised_answer,
+                    "result": (
+                        f"Branch '{br['subtask_name']}' ({br['agent']}) [debate round "
+                        f"{round_num}/{total_rounds}]:\n{revised_answer}"
+                    ),
+                    "state": engine.state,
+                }
+
+            branch_results = await asyncio.gather(
+                *(run_revision(br) for br in branch_results)
+            )
+
+        return branch_results
 
     async def _aggregate_vote(
         self, task: Any, branch_results: list[dict], text_results: list[str]
@@ -1992,14 +2434,69 @@ class RuntimeEngine:
             msgs_to_remove = (consecutive_errors - 1) * 2
             self.messages = self.messages[:-msgs_to_remove]
 
-            # Inject a hard system boundary
-            self.messages.append(
-                {
-                    "role": "system",
-                    "content": f"[SYSTEM GUARD]: You have attempted to use the tool '{last_tool}' {consecutive_errors} times in a row, and it failed with the exact same error every time. YOU ARE STUCK IN A LOOP. You must stop using this tool and formulate a completely different approach.",
-                }
+            # Inject a hard system boundary — mentions recall_episodes only when episodic memory
+            # is actually configured, since suggesting a tool the agent doesn't have would just
+            # be confusing.
+            guard_text = (
+                f"[SYSTEM GUARD]: You have attempted to use the tool '{last_tool}' {consecutive_errors} "
+                "times in a row, and it failed with the exact same error every time. YOU ARE STUCK IN A "
+                "LOOP. You must stop using this tool and formulate a completely different approach."
             )
+            if self.graph.config.episodic_memory:
+                guard_text += (
+                    " Consider calling recall_episodes(event_type='failure_pattern') first — a past "
+                    "session may have already hit this exact failure and recorded what to avoid."
+                )
+            self.messages.append({"role": "system", "content": guard_text})
             self._save_checkpoint()
+            self._reflect_on_error_loop(last_tool, last_error, consecutive_errors)
+
+    def _reflect_on_error_loop(self, tool_name: str, error_text: str, consecutive_errors: int) -> None:
+        """Reflexion-style connector between two features that already existed separately:
+        _compress_error_loops (above) already detects and interrupts a repeated-identical-
+        failure loop, but only within the conversation it happened in — the next session, or a
+        different user hitting the same broken tool-call pattern, got no benefit from what this
+        one already learned. Firing a remember_episode call here means a known-bad pattern is
+        recognized and can be recalled across sessions (see the recall_episodes hint appended to
+        the SYSTEM GUARD message above), not just avoided for the rest of this one.
+
+        Deliberately does NOT spend an extra LLM call generating a prose reflection — the raw
+        failure pattern (tool name + exact error text) is itself a concrete, matchable fact, and
+        _compress_error_loops is a synchronous hot path called every turn-loop iteration; adding
+        a completion call here would cost real latency/tokens on every single turn, not just the
+        rare turn where a loop is actually detected. remember_episode's own embedding call is the
+        only added cost, and only on the (rare) turns this fires at all.
+
+        A no-op when episodic_memory isn't configured (remember_episode already no-ops safely in
+        that case, but checking here first avoids scheduling a task and resolving an embedding
+        model for nothing). Fire-and-forget via asyncio.create_task — like the checkpoint save
+        just above, this must never block the turn loop on an embedding-API round trip, and
+        remember_episode is itself best-effort/never-raises, so there's nothing meaningful for
+        the turn loop to react to even if it did await this."""
+        if not self.graph.config.episodic_memory:
+            return
+        import asyncio
+
+        # Weight importance by how many repeats it took to notice — a pattern that recurred
+        # further than the minimum detection threshold (3) is more clearly a real dead end, not
+        # a one-off flake worth diluting future rankings with. Capped at 10 (remember_episode
+        # clamps anyway; computing a valid value here avoids relying on that clamp).
+        importance = min(10, 4 + consecutive_errors)
+
+        async def _write():
+            await self.remember_episode(
+                event_type="failure_pattern",
+                content=(
+                    f"Tool '{tool_name}' failed {consecutive_errors} times in a row with the "
+                    f"exact same error and had to be forcibly interrupted: {error_text}"
+                ),
+                tags=["reflexion", tool_name],
+                importance=importance,
+            )
+
+        task = asyncio.create_task(_write())
+        self._pending_reflection_tasks.add(task)
+        task.add_done_callback(self._pending_reflection_tasks.discard)
 
     def _apply_guardrails(self, content: str | list) -> str | list:
         if not content:
@@ -2123,12 +2620,7 @@ class RuntimeEngine:
 
                 self._save_checkpoint()
 
-                # Keep running turns if transfer happened
-                while True:
-                    self.is_transferring = False
-                    await self._run_agent_turn()
-                    if not self.is_transferring:
-                        break
+                await self._drive_turns_until_settled()
 
             except KeyboardInterrupt:
                 break
@@ -2136,6 +2628,65 @@ class RuntimeEngine:
                 Tracer.log_error(f"Runtime error: {e}")
 
         await self.mcp_manager.cleanup()
+
+    async def run_once(self, message: str) -> str:
+        """Non-interactive single-turn counterpart to chat_loop, for `inta dev --once` and any
+        future scripting use: applies the same guardrails/compression/checkpointing side effects
+        and drives turns through the same shared helper, but takes its input as an argument
+        instead of blocking on stdin, and returns the final assistant message's content instead
+        of looping forever. Cleans up MCP connections itself since (unlike chat_loop) nothing
+        else calls back into this engine afterwards."""
+        safe_input = self._apply_guardrails(message)
+        self.messages.append({"role": "user", "content": safe_input})
+
+        await self._compress_memory()
+        self._save_checkpoint()
+
+        await self._drive_turns_until_settled()
+
+        await self.mcp_manager.cleanup()
+
+        return next(
+            (
+                m["content"]
+                for m in reversed(self.messages)
+                if m.get("role") == "assistant" and m.get("content")
+            ),
+            "",
+        )
+
+    async def _drive_turns_until_settled(self) -> None:
+        """Runs `_run_agent_turn` repeatedly while a handoff keeps `is_transferring` true (one
+        user message can pass through several agents before the swarm settles), printing any
+        router-trace entries recorded along the way that did NOT fire. Shared by chat_loop and
+        run_once so both behave identically turn-for-turn."""
+        while True:
+            self.is_transferring = False
+            trace_before = len(self.state.get("_router_trace", []))
+            trimmed_before = self._router_trace_trimmed
+            await self._run_agent_turn()
+            trace_before -= self._router_trace_trimmed - trimmed_before
+            self._print_new_router_trace(max(trace_before, 0))
+            if not self.is_transferring:
+                break
+
+    def _print_new_router_trace(self, since_index: int) -> None:
+        """Prints, live in the terminal, any `_router_trace` entries (see
+        `_record_router_trace`) appended since `since_index` that did NOT fire — the same
+        non-fired/errored entries `inta replay` renders after the fact (cli.py's replay
+        command), surfaced at the moment they happen instead of only in hindsight. A router that
+        DID fire already leaves a "Router: Transferred to..." system message, so it's skipped
+        here to avoid repeating it."""
+        for entry in self.state.get("_router_trace", [])[since_index:]:
+            if entry.get("fired"):
+                continue
+            if entry.get("error"):
+                console.print(
+                    f"[dim yellow]⚠ Router did not fire (condition raised):[/dim yellow] "
+                    f"{entry['description']} — [dim]{entry['error']}[/dim]"
+                )
+            else:
+                console.print(f"[dim]· Router evaluated, did not fire:[/dim] {entry['description']}")
 
     async def _compress_memory(self):
         max_msgs = self.graph.config.memory.max_messages
@@ -2312,6 +2863,7 @@ class RuntimeEngine:
             }
         )
         if len(trace) > 50:
+            self._router_trace_trimmed += len(trace) - 50
             del trace[:-50]
 
     async def _resolve_routing(self, agent_cfg) -> str | None:
@@ -2699,11 +3251,24 @@ class RuntimeEngine:
         usage = getattr(response, "usage", None)
         if not usage:
             return
-        try:
-            cost = litellm.completion_cost(completion_response=response) or 0.0
-        except Exception:
-            cost = (usage.prompt_tokens * 0.00001) + (usage.completion_tokens * 0.00003)
-        Tracer.log_cost(usage.total_tokens, cost)
+        if str(getattr(response, "model", "")).startswith(MOCK_MODEL_PREFIX):
+            # A mock/echo response has no real backend cost — unlike a genuine custom/self-hosted
+            # model litellm just can't price (where the per-token fallback below is a reasonable
+            # guess), a fabricated non-zero number here would actively contradict the mock
+            # reply's own "no API key needed" message.
+            cost = 0.0
+        else:
+            try:
+                cost = litellm.completion_cost(completion_response=response) or 0.0
+            except Exception:
+                cost = (usage.prompt_tokens * 0.00001) + (usage.completion_tokens * 0.00003)
+        Tracer.log_cost(
+            usage.total_tokens,
+            cost,
+            model=str(getattr(response, "model", "")) or None,
+            prompt_tokens=getattr(usage, "prompt_tokens", None),
+            completion_tokens=getattr(usage, "completion_tokens", None),
+        )
         if "_metrics" not in self.state:
             self.state["_metrics"] = {"total_tokens": 0, "total_cost": 0.0}
         self.state["_metrics"]["total_tokens"] += usage.total_tokens
@@ -2716,6 +3281,24 @@ class RuntimeEngine:
         # a historical session without needing per-turn state snapshots.
         self.state.setdefault("_cost_trace", []).append(
             {"turn": len(self.messages), "tokens": usage.total_tokens, "cost": cost}
+        )
+
+    def _cap_tool_result(self, result):
+        """Truncates an oversized tool result before it enters conversation history — see
+        circuit_breakers.max_tool_result_chars. Applied once, here, in run_single_tool below
+        rather than at every individual execute_tool return site, since every path (local tool,
+        MCP tool, load_skill, delegate_task/delegate_to_many, spawn_agent, ...) funnels through
+        this one point on its way into a tool-role message's content."""
+        if not isinstance(result, str):
+            return result
+        max_chars = self.graph.config.circuit_breakers.max_tool_result_chars
+        if not max_chars or len(result) <= max_chars:
+            return result
+        return (
+            result[:max_chars]
+            + f"\n\n[System: tool result truncated — {len(result):,} characters total, showing "
+            f"the first {max_chars:,} (circuit_breakers.max_tool_result_chars). Narrow your "
+            "query or ask the tool to paginate if you need the rest.]"
         )
 
     async def _execute_tool_calls_with_healing(self, tool_calls, interactive: bool) -> list[dict]:
@@ -2826,7 +3409,7 @@ class RuntimeEngine:
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "name": func_name,
-                "content": result,
+                "content": self._cap_tool_result(result),
             }
             deferred_merge = self._deferred_child_merges.get(tc.id)
             scratch[tc.id] = {
@@ -2903,13 +3486,33 @@ class RuntimeEngine:
         result_map = {r["tool_call_id"]: r for r in results}
         return [result_map[tc.id] for tc in tool_calls]
 
-    async def _apply_response_schema(self, agent_cfg, msg):
+    def _resolve_cascade_entry_model(self, agent_cfg) -> str | None:
+        """The actual cost saving in model.cascade (FrugalGPT-style): when agent_cfg has
+        response_schema set and model.cascade is configured, the WHOLE turn — including any
+        tool calls the agent makes along the way, not just the terminal response — runs on
+        cascade[0] instead of model.primary. Safe to apply to the whole turn regardless of what
+        tools get called: escalation on a schema-validation failure (_apply_response_schema)
+        only ever regenerates the pure-text terminal answer afterward, never re-runs tool calls.
+        Returns None (caller falls through to model.primary as before) for any agent that hasn't
+        opted into both response_schema and model.cascade — this changes nothing otherwise."""
+        if not getattr(agent_cfg, "response_schema", None):
+            return None
+        cascade = self.graph.config.model.cascade
+        return cascade[0] if cascade else None
+
+    async def _apply_response_schema(self, agent_cfg, msg, current_messages: list[dict] | None = None):
         """When `agent_cfg.response_schema` is set and this is a terminal (no tool_calls, has
-        content) response, validates msg.content as JSON against that Pydantic model. On failure,
-        asks a fast corrector model to rewrite it to satisfy the schema — the same self-healing
-        pattern already used for malformed tool-call arguments — retries validation once, and
-        appends a visible warning to the content if it still doesn't validate. Mutates and returns
-        `msg` so callers can persist the (possibly healed) content."""
+        content) response, validates msg.content as JSON against that Pydantic model. On
+        failure: if model.cascade is configured, first tries escalating to each remaining
+        cascade tier (a full regeneration off `current_messages`, not a patch — see the cascade
+        block below) before falling back to asking a fast corrector model to rewrite the
+        original content to satisfy the schema — the same self-healing pattern already used for
+        malformed tool-call arguments. Appends a visible warning to the content if nothing
+        validates. Mutates and returns `msg` so callers can persist the (possibly healed)
+        content. `current_messages` (the exact messages list the just-failed completion was
+        generated from) is optional — omitting it (no other call site does today) simply skips
+        cascade escalation and goes straight to the corrector-patch fallback, so an unaware
+        future caller degrades safely rather than breaking."""
         schema_path = getattr(agent_cfg, "response_schema", None)
         if not schema_path or msg.tool_calls or not msg.content:
             return msg
@@ -2939,6 +3542,44 @@ class RuntimeEngine:
         err = _validate(msg.content)
         if err is None:
             return msg
+
+        # model.cascade escalation: a schema-validation failure from a cheap cascade tier gets a
+        # real regeneration attempt from the next tier up, not just a reformatting patch — a weak
+        # model's wrong/incomplete answer often isn't fixable by asking a corrector to reshape
+        # the same broken content into JSON. Safe: msg.tool_calls was already confirmed empty
+        # above, and this regenerates only the terminal text off the existing message history —
+        # no tool call the turn already made gets re-executed. Always ends at model.primary as
+        # the final tier (deduped if it's already in `cascade`), so a cascade can never produce a
+        # worse ceiling than not using one — the corrector-patch fallback below still runs,
+        # against the *original* content/error, if even that fails.
+        cascade = self.graph.config.model.cascade
+        if cascade and current_messages is not None:
+            seen = {cascade[0]}  # cascade[0] is what just failed — already resolved by the caller
+            remaining_tiers = []
+            for tier_model in [*cascade[1:], self.graph.config.model.primary]:
+                if tier_model not in seen:
+                    seen.add(tier_model)
+                    remaining_tiers.append(tier_model)
+
+            for tier_model in remaining_tiers:
+                try:
+                    escalated = await litellm.acompletion(
+                        model=tier_model,
+                        messages=current_messages,
+                        temperature=self.graph.config.model.temperature,
+                        max_tokens=self.graph.config.model.max_tokens,
+                        response_format={"type": "json_object"},
+                        num_retries=2,
+                    )
+                    candidate = escalated.choices[0].message.content
+                    if candidate and _validate(candidate) is None:
+                        msg.content = candidate
+                        Tracer.log_step(
+                            "Cascade", f"response_schema satisfied by escalating to '{tier_model}'"
+                        )
+                        return msg
+                except Exception as cascade_err:
+                    Tracer.log_error(f"model.cascade escalation to '{tier_model}' failed: {cascade_err}")
 
         try:
             corrector_model = self.graph.config.model.fallback or "gemini/gemini-2.5-flash"
@@ -3003,6 +3644,7 @@ class RuntimeEngine:
         raw_model = (
             agent_cfg.model_override
             or self.state.get("_model_variant")
+            or self._resolve_cascade_entry_model(agent_cfg)
             or self.graph.config.model.primary
         )
         last_user_msg = next(
@@ -3037,6 +3679,13 @@ class RuntimeEngine:
                 "stream": True,
                 "num_retries": 2,
             }
+
+            if model.startswith(MOCK_MODEL_PREFIX):
+                # custom_llm_provider bypasses litellm's own get_llm_provider(model) lookup,
+                # which otherwise runs before the mock_response short-circuit and doesn't
+                # recognize "mock" as a provider prefix.
+                kwargs["mock_response"] = _mock_reply(last_user_msg)
+                kwargs["custom_llm_provider"] = "openai"
 
             if self.graph.config.model.use_cache:
                 kwargs["caching"] = True
@@ -3115,7 +3764,7 @@ class RuntimeEngine:
             if msg.content:
                 msg.content = self._apply_guardrails(msg.content)
 
-            msg = await self._apply_response_schema(agent_cfg, msg)
+            msg = await self._apply_response_schema(agent_cfg, msg, current_messages)
 
             self.messages.append(msg.model_dump(exclude_none=True))
             self._save_checkpoint()
@@ -3238,6 +3887,7 @@ class RuntimeEngine:
         raw_model = (
             agent_cfg.model_override
             or self.state.get("_model_variant")
+            or self._resolve_cascade_entry_model(agent_cfg)
             or self.graph.config.model.primary
         )
         last_user_msg = next(
@@ -3274,6 +3924,13 @@ class RuntimeEngine:
                 "max_tokens": self.graph.config.model.max_tokens,
                 "num_retries": 2,
             }
+
+            if model.startswith(MOCK_MODEL_PREFIX):
+                # custom_llm_provider bypasses litellm's own get_llm_provider(model) lookup,
+                # which otherwise runs before the mock_response short-circuit and doesn't
+                # recognize "mock" as a provider prefix.
+                kwargs["mock_response"] = _mock_reply(last_user_msg)
+                kwargs["custom_llm_provider"] = "openai"
 
             if self.graph.config.model.use_cache:
                 kwargs["caching"] = True
@@ -3328,7 +3985,7 @@ class RuntimeEngine:
             if msg.content:
                 msg.content = self._apply_guardrails(msg.content)
 
-            msg = await self._apply_response_schema(agent_cfg, msg)
+            msg = await self._apply_response_schema(agent_cfg, msg, current_messages)
 
             self.messages.append(msg.model_dump(exclude_none=True))
 

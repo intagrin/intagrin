@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import json
 import os
@@ -22,6 +23,8 @@ from rich.console import Console
 
 from ..compiler.parser import parse_project
 from ..errors import IntaGrinError
+from ..runtime.approvers import add_approver, list_approvers, revoke_approver
+from ..runtime.approvers import verify_secret as verify_approver_secret
 from ..runtime.engine import RuntimeEngine, extract_final_answer
 from ..runtime.rate_limiter import check_rate_limit
 from ..runtime.run_logger import record_run_log
@@ -42,8 +45,6 @@ def health_check():
     return {"status": "ok"}
 @app.on_event("startup")
 async def startup_event():
-    import asyncio
-
     from intagrin.db_migrations.auto_migrate import run_auto_migrations
     await asyncio.to_thread(run_auto_migrations)
 
@@ -60,16 +61,22 @@ async def startup_event():
             for agent_cfg in graph.config.agents.values()
             for t in agent_cfg.tools
         )
+        has_db_approvers = any(
+            not row.get("revoked_at")
+            for row in list_approvers(graph.config.memory, Path.cwd())
+        )
         if has_approval_gated_tools and not (
-            graph.config.server.auth.approver_env_var or graph.config.server.auth.approvers
+            graph.config.server.auth.approver_env_var
+            or graph.config.server.auth.approvers
+            or has_db_approvers
         ):
             console.print(
-                "[bold yellow]⚠ One or more tools declare requires_approval: true, but neither "
-                "server.auth.approver_env_var nor server.auth.approvers is set — the same "
-                "credential that triggers a gated tool call can immediately approve it via "
-                "/resume with no separate review. Set `server: {auth: {approver_env_var: ...}}` "
-                "(single approver) or `approvers: {...}` (named/multi-approver) in ai.yaml to "
-                "require a distinct approver credential.[/bold yellow]"
+                "[bold yellow]⚠ One or more tools declare requires_approval: true, but no "
+                "approver credential is configured — the same credential that triggers a gated "
+                "tool call can immediately approve it via /resume with no separate review. Set "
+                "`server: {auth: {approver_env_var: ...}}` (single approver) or `approvers: "
+                "{...}` (named/multi-approver) in ai.yaml, or run `inta approvers add <id>` to "
+                "issue a DB-backed reviewer credential without an ai.yaml/.env edit.[/bold yellow]"
             )
     except Exception:
         pass
@@ -141,20 +148,52 @@ def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
     return authenticate_token(token)
 
 
-def identify_approver(request: Request, graph) -> str:
+def verify_admin_auth(credentials: HTTPAuthorizationCredentials = Security(security)) -> None:
+    """Gates the /approvers management endpoints (issue/list/revoke DB-backed reviewer
+    credentials over HTTP — see runtime/approvers.py). Deliberately its own, even-more-privileged
+    credential tier, checked against `server.auth.admin_env_var` — separate from both the main
+    session auth (verify_auth) and any individual approver's own X-Approver-Key. Without this
+    separation, whoever holds the main API key could hit this endpoint, mint themselves an
+    approver credential, and immediately approve their own gated tool call — exactly the hole
+    approver_env_var/approvers already closes for /resume itself.
+
+    Unlike identify_approver's env-var path, there is no "if unset, same credential works"
+    fallback: these endpoints didn't exist before, so the safe default is closed (503), not open."""
+    graph = parse_project(Path.cwd())
+    admin_env_var = graph.config.server.auth.admin_env_var
+    if not admin_env_var:
+        raise HTTPException(
+            status_code=503,
+            detail="Approver-management API is disabled. Set server.auth.admin_env_var in ai.yaml to enable it.",
+        )
+    expected = os.environ.get(admin_env_var)
+    token = credentials.credentials if credentials else None
+    if not expected or not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="Missing or invalid admin credential.")
+
+
+def identify_approver(request: Request, graph, project_dir: Path) -> str:
     """Checked only when /resume is approving (not denying) a requires_approval tool call —
     separately from the requester's own session auth via verify_auth. Without this, the same
     credential that triggered a gated call can immediately approve it, which is not a real
-    privilege boundary. Opt-in via server.auth.approver_env_var / server.auth.approvers (see the
-    startup warning in startup_event when tools declare requires_approval but neither is set) —
-    when neither is configured, today's behavior (same credential approves) is preserved rather
+    privilege boundary. Opt-in via server.auth.approver_env_var / server.auth.approvers, or via
+    DB-backed credentials issued through `inta approvers add` (runtime/approvers.py) — see the
+    startup warning in startup_event when tools declare requires_approval but none of the three is
+    set — when none is configured, today's behavior (same credential approves) is preserved rather
     than breaking existing deployments, and this returns the fixed id "default" without checking
     any header.
 
     Returns the id of the approver whose X-Approver-Key secret matched, so /resume can track
     which of a multi-approver chain's required approvers has signed off (see
     RuntimeEngine._pause_for_human's required_approvals/required_approvers). approver_env_var, if
-    set, is checked as the implicit approver id "default" alongside any named `approvers`."""
+    set, is checked as the implicit approver id "default" alongside any named `approvers`.
+
+    DB-backed credentials are checked first (they're the deployment-recommended path — issued and
+    revoked at runtime with no plaintext secret in the environment, see runtime/approvers.py's
+    module docstring) and env-var candidates second — a project can use either or both. An
+    optional X-Approver-Id header lets a caller that already knows its own approver_id skip
+    verify_secret's per-row scrypt scan (see its docstring); omitting it still works, just without
+    that optimization."""
     auth_cfg = graph.config.server.auth
     approver_env_var = auth_cfg.approver_env_var
     approvers = auth_cfg.approvers
@@ -165,11 +204,20 @@ def identify_approver(request: Request, graph) -> str:
     if approver_env_var:
         candidates.setdefault("default", approver_env_var)
 
-    if not candidates:
+    provided = request.headers.get("X-Approver-Key")
+    has_db_approvers = any(
+        not row.get("revoked_at")
+        for row in list_approvers(graph.config.memory, project_dir)
+    )
+
+    if not candidates and not has_db_approvers:
         return "default"
 
-    provided = request.headers.get("X-Approver-Key")
     if provided:
+        id_hint = request.headers.get("X-Approver-Id")
+        db_match = verify_approver_secret(graph.config.memory, project_dir, provided, id_hint)
+        if db_match:
+            return db_match
         for approver_id, env_var in candidates.items():
             expected = os.environ.get(env_var)
             if expected and secrets.compare_digest(provided, expected):
@@ -206,7 +254,7 @@ class ResumeRequest(BaseModel):
     edited_args: dict | None = None
 
 
-def _log_run(
+async def _log_run(
     graph,
     project_dir: Path,
     engine: RuntimeEngine,
@@ -221,7 +269,8 @@ def _log_run(
     metrics and latency the same way at every call site, then hands off to record_run_log (which
     is itself best-effort and never raises)."""
     metrics = engine.state.get("_metrics", {}) or {}
-    record_run_log(
+    await asyncio.to_thread(
+        record_run_log,
         graph.config.memory,
         project_dir,
         session_id=session_id,
@@ -438,7 +487,7 @@ async def _resume_nested_child_approval(
                 f"Approved by '{approver_id}'. Still awaiting {remaining} more "
                 "approval(s)" + (f" from {outstanding}" if outstanding else "") + "."
             )
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/resume", namespaced_session,
                 "awaiting_approval", None, pre_metrics, run_start,
             )
@@ -501,7 +550,7 @@ async def _resume_nested_child_approval(
         engine._save_checkpoint()
         await child_engine._await_last_checkpoint()
         await engine._await_last_checkpoint()
-        _log_run(
+        await _log_run(
             graph, project_dir, engine, "/resume", namespaced_session,
             "awaiting_approval", None, pre_metrics, run_start,
         )
@@ -579,7 +628,7 @@ async def _resume_nested_child_approval(
     engine._save_checkpoint()
     await engine._await_last_checkpoint()
 
-    _log_run(
+    await _log_run(
         graph, project_dir, engine, "/resume", namespaced_session,
         status, None, pre_metrics, run_start,
     )
@@ -599,8 +648,11 @@ async def chat_endpoint(req: ChatRequest, user_context: str = Depends(verify_aut
     graph = None
     try:
         graph = parse_project(project_dir)
-        check_rate_limit(
-            graph.config.memory, project_dir, user_context, graph.config.server.rate_limit
+        # check_rate_limit does blocking sqlite/psycopg I/O (runtime/rate_limiter.py) — must
+        # not run directly on the event loop thread of this async endpoint.
+        await asyncio.to_thread(
+            check_rate_limit,
+            graph.config.memory, project_dir, user_context, graph.config.server.rate_limit,
         )
         namespaced_session = f"{user_context}:{req.session_id}"
         # Serializes concurrent requests for the same session — without this, two overlapping
@@ -623,7 +675,7 @@ async def chat_endpoint(req: ChatRequest, user_context: str = Depends(verify_aut
 
             blocked = _pending_approval_block(engine)
             if blocked is not None:
-                _log_run(
+                await _log_run(
                     graph, project_dir, engine, "/chat", namespaced_session,
                     "awaiting_approval", None, _pre_metrics, _run_start,
                 )
@@ -654,7 +706,7 @@ async def chat_endpoint(req: ChatRequest, user_context: str = Depends(verify_aut
             engine._save_checkpoint()
             await engine._await_last_checkpoint()
 
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/chat", namespaced_session,
                 status, None, _pre_metrics, _run_start,
             )
@@ -674,7 +726,7 @@ async def chat_endpoint(req: ChatRequest, user_context: str = Depends(verify_aut
     except Exception as e:
         Tracer.log_error(f"API Error: {e}")
         if engine is not None and graph is not None:
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/chat", namespaced_session,
                 "error", str(e), _pre_metrics, _run_start,
             )
@@ -699,8 +751,11 @@ async def chat_stream_endpoint(
     await lock.acquire()
     try:
         graph = parse_project(project_dir)
-        check_rate_limit(
-            graph.config.memory, project_dir, user_context, graph.config.server.rate_limit
+        # check_rate_limit does blocking sqlite/psycopg I/O (runtime/rate_limiter.py) — must
+        # not run directly on the event loop thread of this async endpoint.
+        await asyncio.to_thread(
+            check_rate_limit,
+            graph.config.memory, project_dir, user_context, graph.config.server.rate_limit,
         )
         shared = await get_shared_resources_cache().get(graph, project_dir)
         engine = RuntimeEngine(
@@ -716,7 +771,7 @@ async def chat_stream_endpoint(
 
         blocked = _pending_approval_block(engine)
         if blocked is not None:
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/chat/stream", namespaced_session,
                 "awaiting_approval", None, _pre_metrics, _run_start,
             )
@@ -754,7 +809,7 @@ async def chat_stream_endpoint(
             engine._save_checkpoint()
             await engine._await_last_checkpoint()
 
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/chat/stream", namespaced_session,
                 status, None, _pre_metrics, _run_start,
             )
@@ -770,7 +825,7 @@ async def chat_stream_endpoint(
             import json
 
             Tracer.log_error(f"Chat Stream Error: {e}")
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/chat/stream", namespaced_session,
                 "error", str(e), _pre_metrics, _run_start,
             )
@@ -794,10 +849,21 @@ async def resume_endpoint(
     graph = None
     try:
         graph = parse_project(project_dir)
-        check_rate_limit(
-            graph.config.memory, project_dir, user_context, graph.config.server.rate_limit
+        # check_rate_limit does blocking sqlite/psycopg I/O (runtime/rate_limiter.py) — must
+        # not run directly on the event loop thread of this async endpoint.
+        await asyncio.to_thread(
+            check_rate_limit,
+            graph.config.memory, project_dir, user_context, graph.config.server.rate_limit,
         )
-        approver_id = identify_approver(request, graph) if req.approved else None
+        # identify_approver does blocking sqlite/psycopg I/O (runtime/approvers.py) and, on a
+        # DB-backed match attempt, a deliberately CPU/memory-heavy scrypt hash per active
+        # approver — run on the event loop thread (this is `async def`), that would stall every
+        # other in-flight request on this process for the duration, not just this one.
+        approver_id = (
+            await asyncio.to_thread(identify_approver, request, graph, project_dir)
+            if req.approved
+            else None
+        )
         namespaced_session = f"{user_context}:{req.session_id}"
         async with get_session_lock_registry().get_lock(namespaced_session):
             shared = await get_shared_resources_cache().get(graph, project_dir)
@@ -857,7 +923,7 @@ async def resume_endpoint(
                         f"Approved by '{approver_id}'. Still awaiting {remaining} more "
                         "approval(s)" + (f" from {outstanding}" if outstanding else "") + "."
                     )
-                    _log_run(
+                    await _log_run(
                         graph, project_dir, engine, "/resume", namespaced_session,
                         "awaiting_approval", None, _pre_metrics, _run_start,
                     )
@@ -907,7 +973,7 @@ async def resume_endpoint(
             engine._save_checkpoint()
             await engine._await_last_checkpoint()
 
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/resume", namespaced_session,
                 status, None, _pre_metrics, _run_start,
             )
@@ -929,7 +995,7 @@ async def resume_endpoint(
     except Exception as e:
         Tracer.log_error(f"Resume Error: {e}")
         if engine is not None and graph is not None:
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/resume", namespaced_session,
                 "error", str(e), _pre_metrics, _run_start,
             )
@@ -982,6 +1048,69 @@ def get_sessions(user_context: str = Depends(verify_auth)):
         Tracer.log_error(f"Sessions Listing Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+class ApproverCreateRequest(BaseModel):
+    approver_id: str
+
+
+@app.post("/approvers")
+def create_approver(req: ApproverCreateRequest, _: None = Depends(verify_admin_auth)):
+    """
+    Issues (or rotates, if approver_id already exists) a DB-backed X-Approver-Key credential —
+    the HTTP equivalent of `inta approvers add`, for a consumer's own admin site/tooling. The
+    generated secret is returned exactly once; it is not recoverable afterwards (only
+    revoke-and-reissue). Gated by verify_admin_auth, a separate credential tier from both the
+    main session auth and any individual approver's own key.
+    """
+    project_dir = Path.cwd()
+    try:
+        graph = parse_project(project_dir)
+        secret = secrets.token_urlsafe(32)
+        add_approver(graph.config.memory, project_dir, req.approver_id, secret)
+        return {"approver_id": req.approver_id, "secret": secret}
+    except IntaGrinError:
+        raise
+    except Exception as e:
+        Tracer.log_error(f"Approver Create Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/approvers")
+def list_approvers_endpoint(_: None = Depends(verify_admin_auth)):
+    """Lists every DB-backed approver (active and revoked) — ids and timestamps only, never
+    secrets/hashes."""
+    project_dir = Path.cwd()
+    try:
+        graph = parse_project(project_dir)
+        return {"approvers": list_approvers(graph.config.memory, project_dir)}
+    except IntaGrinError:
+        raise
+    except Exception as e:
+        Tracer.log_error(f"Approver List Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/approvers/{approver_id}")
+def revoke_approver_endpoint(approver_id: str, _: None = Depends(verify_admin_auth)):
+    """Revokes an approver's credential — it can no longer approve via /resume. Kept in the
+    database for audit history rather than deleted."""
+    project_dir = Path.cwd()
+    try:
+        graph = parse_project(project_dir)
+        if not revoke_approver(graph.config.memory, project_dir, approver_id):
+            raise HTTPException(
+                status_code=404, detail=f"No active approver named '{approver_id}'."
+            )
+        return {"approver_id": approver_id, "revoked": True}
+    except HTTPException:
+        raise
+    except IntaGrinError:
+        raise
+    except Exception as e:
+        Tracer.log_error(f"Approver Revoke Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/stream")
 async def stream_endpoint(req: ChatRequest, user_context: str = Depends(verify_auth)):
     """
@@ -996,8 +1125,11 @@ async def stream_endpoint(req: ChatRequest, user_context: str = Depends(verify_a
     await lock.acquire()
     try:
         graph = parse_project(project_dir)
-        check_rate_limit(
-            graph.config.memory, project_dir, user_context, graph.config.server.rate_limit
+        # check_rate_limit does blocking sqlite/psycopg I/O (runtime/rate_limiter.py) — must
+        # not run directly on the event loop thread of this async endpoint.
+        await asyncio.to_thread(
+            check_rate_limit,
+            graph.config.memory, project_dir, user_context, graph.config.server.rate_limit,
         )
         shared = await get_shared_resources_cache().get(graph, project_dir)
         engine = RuntimeEngine(
@@ -1013,7 +1145,7 @@ async def stream_endpoint(req: ChatRequest, user_context: str = Depends(verify_a
 
         blocked = _pending_approval_block(engine)
         if blocked is not None:
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/stream", namespaced_session,
                 "awaiting_approval", None, _pre_metrics, _run_start,
             )
@@ -1061,7 +1193,7 @@ async def stream_endpoint(req: ChatRequest, user_context: str = Depends(verify_a
             # actually finished, with no client-visible signal that anything needed /resume.
             pending_action = engine.state.get("_pending_approval", None)
             status = "awaiting_approval" if pending_action else "completed"
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/stream", namespaced_session,
                 status, None, _pre_metrics, _run_start,
             )
@@ -1073,7 +1205,7 @@ async def stream_endpoint(req: ChatRequest, user_context: str = Depends(verify_a
             # except clause at all, so an error here just died silently mid-stream with no
             # client-visible event — and no chance to log it either.
             Tracer.log_error(f"Stream Error: {e}")
-            _log_run(
+            await _log_run(
                 graph, project_dir, engine, "/stream", namespaced_session,
                 "error", str(e), _pre_metrics, _run_start,
             )
@@ -1187,3 +1319,10 @@ async def voice_websocket_endpoint(
     except Exception as e:
         Tracer.log_error(f"Voice WebSocket error: {e}")
         await websocket.close()
+
+
+# Registers GET /.well-known/agent-card.json and POST /a2a onto this same `app` — imported for
+# its side effect (route registration) at the bottom of this file, since a2a.py imports
+# chat_endpoint/stream_endpoint/verify_auth/app from this module and those names must already
+# exist. See server/a2a.py for the full A2A (Agent2Agent protocol) surface this adds.
+from . import a2a  # noqa: E402,F401

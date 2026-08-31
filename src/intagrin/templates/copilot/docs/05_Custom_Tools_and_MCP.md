@@ -45,6 +45,38 @@ Every MCP connection and OpenAPI spec fetch declared in `ai.yaml` — global and
 established concurrently on startup, not one at a time. Ten MCP servers cost roughly as long as
 the single slowest one to connect, not the sum of all ten.
 
+Pass extra environment variables to the server subprocess with `env` (merged over the process's
+own default environment — useful for a server-specific API key you don't want exported globally):
+
+```yaml
+tools:
+  - name: "github_mcp"
+    type: "mcp"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    env:
+      GITHUB_TOKEN: "${GITHUB_MCP_TOKEN}"
+```
+
+### Long-running calls (the MCP Tasks extension)
+
+A modern MCP server can *claim* a tool call instead of answering it immediately — useful for a
+job that genuinely takes minutes (a large export, a slow external API). IntaGrin handles this
+without blocking the conversation: when a server claims a call, the agent gets back a plain tool
+result naming a task id and is automatically given a `check_mcp_task_status(task_id)` tool to poll
+it on a later turn — the same conversational tool-calling loop, not a new pause type. A server
+that doesn't support the Tasks extension is completely unaffected; nothing changes for it.
+
+```yaml
+tools:
+  - name: "export_service"
+    type: "mcp"
+    command: "npx"
+    args: ["-y", "@example/export-mcp-server"]
+    max_task_wait_seconds: 600 # optional — how long a claimed task may run before it's treated
+    # as failed. Omit for no cap (the default) if the server's jobs have no natural time limit.
+```
+
 ## 3. Sandboxed Code Execution
 For an agent that needs to *run* code an LLM produced (not just call a fixed function you wrote), declare a `type: "sandbox"` tool instead of shelling out from inside a local tool — see [03_Tools_and_Actions.md](./03_Tools_and_Actions.md#running-agent-generated-code-type-sandbox) for the full config and exactly what isolation it does and doesn't provide.
 

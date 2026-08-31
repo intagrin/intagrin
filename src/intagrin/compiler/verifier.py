@@ -5,7 +5,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from ..compiler.parser import parse_project
-from ..config.schema import SandboxToolConfig, ToolReferenceConfig
+from ..config.schema import MCPToolConfig, SandboxToolConfig, ToolReferenceConfig
 from ..runtime.router import validate_condition_syntax
 
 console = Console()
@@ -125,6 +125,26 @@ class GraphVerifier:
                 console.print(
                     "\n[bold green]✓ All available_when conditions are syntactically valid.[/bold green]"
                 )
+
+        # --- Agent Skills: a dangling SkillConfig.path is a genuine config bug (same severity
+        # class as a missing system_prompt_file would be) — the skill would silently return an
+        # error string to the LLM the first time load_skill is actually called, instead of being
+        # caught here at verify time. ---
+        missing_skill_paths = []
+        for skill_cfg in getattr(cfg, "skills", []) or []:
+            resolved = (self.project_dir / skill_cfg.path).resolve()
+            if not resolved.exists():
+                missing_skill_paths.append((skill_cfg.name, skill_cfg.path))
+        if missing_skill_paths:
+            console.print(
+                "\n[bold red]✗ Agent Skill path(s) do not exist on disk:[/bold red]"
+            )
+            for skill_name, path in missing_skill_paths:
+                console.print(f"   ↳ [dim]{skill_name}: {path}[/dim]")
+        elif cfg.skills:
+            console.print(
+                "\n[bold green]✓ All Agent Skill paths resolve to an existing file/directory.[/bold green]"
+            )
 
         # --- state_schema presence: a nudge, not a failure. Without it, write_state accepts any
         # key/type with zero validation — a typo'd key or a value of the wrong type sits silently
@@ -249,6 +269,29 @@ class GraphVerifier:
             )
             for agent_name, tool_name in ungated_sandboxes:
                 console.print(f"   ↳ [dim]{agent_name}.{tool_name}[/dim]")
+
+        # --- MCP Tasks extension: a claimed (long-running) call with no max_task_wait_seconds
+        # is unbounded from check_mcp_task_status's point of view — it will keep reporting
+        # "still running" forever rather than eventually failing. Advisory only: plenty of
+        # legitimately long-running tasks have no natural timeout. ---
+        mcp_tools_without_wait_cap = []
+        seen_mcp_names = set()
+        for tool in list(cfg.tools) + [
+            t for a in cfg.agents.values() for t in (getattr(a, "tools", []) or [])
+        ]:
+            if isinstance(tool, MCPToolConfig) and tool.name not in seen_mcp_names:
+                seen_mcp_names.add(tool.name)
+                if tool.max_task_wait_seconds is None:
+                    mcp_tools_without_wait_cap.append(tool.name)
+        if mcp_tools_without_wait_cap:
+            console.print(
+                "\n[dim]ℹ MCP tool(s) without max_task_wait_seconds — if the server claims a "
+                "call as a long-running task (the MCP Tasks extension), check_mcp_task_status "
+                "will treat it as still legitimately running indefinitely. Consider setting "
+                "max_task_wait_seconds if the server might use Tasks:[/dim]"
+            )
+            for name in mcp_tools_without_wait_cap:
+                console.print(f"   ↳ [dim]{name}[/dim]")
 
         # --- requires_approval needs a persistent memory backend: a pause is held in
         # state["_pending_approval"], only resumed via a *separate* /resume request, and only
@@ -393,6 +436,18 @@ class GraphVerifier:
             f"{cb.max_parallel_tool_calls_per_turn} concurrent (max_parallel_tool_calls_per_turn)",
             "[green]yes[/green]",
         )
+        if cb.max_tool_result_chars:
+            table.add_row(
+                "Single tool result before it enters context",
+                f"{cb.max_tool_result_chars:,} chars (max_tool_result_chars)",
+                "[green]yes[/green]",
+            )
+        else:
+            table.add_row(
+                "Single tool result before it enters context",
+                "unbounded (max_tool_result_chars: null)",
+                "[red]no[/red]",
+            )
         console.print()
         console.print(table)
 

@@ -253,7 +253,7 @@ memory:
   db_path: ".ai/memory.db"
   max_messages: 20
 
-telemetry: ["langfuse", "otel"]
+telemetry: ["otel"]  # add "langfuse" once you've `pip install langfuse`d it — see .env.example
 
 default_agent: "triage"
 
@@ -518,9 +518,10 @@ Use tools when necessary to look up real-time information.
 ENV_EXAMPLE_TEMPLATE = """OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-api03-...
 
-# Only needed because this starter project's ai.yaml has `telemetry: ["langfuse", "otel"]` —
-# remove that line (or these vars) if you don't want Langfuse tracing. otel needs no extra
-# config here; it exports to whatever OTEL_EXPORTER_* endpoint you've already got configured.
+# ai.yaml ships with telemetry: ["otel"] by default — needs no config here, it exports to
+# whatever OTEL_EXPORTER_* endpoint you've already got configured (or nowhere, harmlessly, if
+# you don't have one). To also add Langfuse tracing: `pip install langfuse` (it's not one of
+# IntaGrin's own dependencies), add "langfuse" to ai.yaml's telemetry list, then set these:
 LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
 """
@@ -604,6 +605,7 @@ def new(
     base_dir.mkdir()
     (base_dir / "tools").mkdir()
     (base_dir / "prompts").mkdir()
+    (base_dir / "skills").mkdir()
     (base_dir / "tests").mkdir()
     (base_dir / "tests" / "evals.yaml").write_text(EVALS_TEMPLATE)
     implement_skill_body = _load_copilot_template("implement_skill_body.md")
@@ -773,7 +775,17 @@ Return EXACTLY a valid JSON object with two keys: "ai_yaml" (string of yaml cont
 
 
 @app.command()
-def dev():
+def dev(
+    once: str | None = typer.Option(
+        None,
+        "--once",
+        help=(
+            "Send a single message non-interactively and print the reply, instead of starting "
+            "the interactive chat loop. Useful for scripting and quick prompt-edit iteration "
+            "without standing up a full tests/evals.yaml."
+        ),
+    ),
+):
     """
     Launch the local developer environment. Use the global --debug / --log-level flag
     (`inta --debug dev`) for verbose tracebacks and LiteLLM request/response logging.
@@ -781,6 +793,29 @@ def dev():
     project_dir = Path.cwd()
     try:
         graph = parse_project(project_dir)
+
+        try:
+            _check_llm_api_key(graph.config.model.primary)
+        except IntaGrinError as e:
+            console.print(
+                f"[bold yellow]Warning:[/bold yellow] {e.message}\n"
+                f'[dim]Tip: set model.primary (or an agent\'s model_override) to "mock/echo" '
+                f"in ai.yaml to try the chat loop with zero API key first — see "
+                f"docs/01_Getting_Started.md. Or run `inta doctor` for a full environment "
+                f"check.[/dim]"
+            )
+
+        if once is not None:
+
+            async def run_once():
+                engine = RuntimeEngine(graph=graph, project_dir=project_dir)
+                await engine.initialize()
+                reply = await engine.run_once(once)
+                console.print(reply)
+
+            asyncio.run(run_once())
+            return
+
         console.print(
             f"[bold green]Starting AI dev server for '{graph.config.name}'...[/bold green]"
         )
@@ -930,8 +965,37 @@ def fuzz_command(
     asyncio.run(fuzzer.fuzz())
 
 
+def _project_fingerprint(project_dir: Path) -> float:
+    """Latest mtime across the files `inta verify --watch` reruns on: ai.yaml, every prompt/tool
+    source file, and schemas.py if present. A single number is enough to detect "something
+    changed" — cheap to poll, no new dependency (e.g. watchdog) for what's just a rerun-on-save
+    convenience."""
+    paths = [project_dir / "ai.yaml", project_dir / "schemas.py"]
+    paths += sorted(project_dir.glob("tools/**/*.py"))
+    paths += sorted(project_dir.glob("prompts/**/*.jinja2"))
+    mtimes = []
+    for p in paths:
+        try:
+            mtimes.append(p.stat().st_mtime)
+        except FileNotFoundError:
+            # An editor's atomic save (temp-file-then-rename) can delete `p` in the window
+            # between glob() listing it and this stat() — just skip it for this poll rather
+            # than crashing the whole --watch loop.
+            continue
+    return max(mtimes, default=0.0)
+
+
 @app.command(name="verify")
-def verify_command():
+def verify_command(
+    watch: bool = typer.Option(
+        False,
+        "--watch",
+        help=(
+            "Rerun verification automatically whenever ai.yaml, schemas.py, tools/, or "
+            "prompts/ change, instead of running once and exiting. Ctrl+C to stop."
+        ),
+    ),
+):
     """
     Run static control-flow verification: cycle detection across handoffs and deterministic
     routers, delegation depth bounds, and a worst-case cost accounting that explicitly reports
@@ -941,8 +1005,378 @@ def verify_command():
     project_dir = Path.cwd()
     from .compiler.verifier import GraphVerifier
 
-    verifier = GraphVerifier(project_dir=project_dir)
-    verifier.verify()
+    if not watch:
+        GraphVerifier(project_dir=project_dir).verify()
+        return
+
+    import time
+    from datetime import datetime
+
+    console.print("[dim]Watching for changes — Ctrl+C to stop.[/dim]\n")
+    last_seen = None
+    try:
+        while True:
+            fingerprint = _project_fingerprint(project_dir)
+            if fingerprint != last_seen:
+                last_seen = fingerprint
+                console.rule(f"[dim]{datetime.now().strftime('%H:%M:%S')}[/dim]")
+                try:
+                    GraphVerifier(project_dir=project_dir).verify()
+                except Exception as e:
+                    Tracer.log_error(f"Verification error: {e}")
+                console.print("\n[dim]Watching for changes — Ctrl+C to stop.[/dim]")
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+
+_DOCTOR_ICONS = {"ok": "[bold green]✓[/bold green]", "warn": "[bold yellow]⚠[/bold yellow]", "fail": "[bold red]✗[/bold red]"}
+
+
+@app.command(name="doctor")
+def doctor_command():
+    """
+    Check this project's environment for the most common reasons `inta dev`/`inta serve` fail —
+    one at a time otherwise. Checks: ai.yaml parses, an API key is set for model.primary (and
+    model.fallback if configured), state_schema actually loads if one is set, and every MCP
+    tool's launch command is on PATH. Prints one green/yellow/red line per check and exits
+    non-zero only on a genuine failure (a missing-but-optional state_schema is a warning, not
+    a failure).
+    """
+    import shutil
+    import sys
+
+    project_dir = Path.cwd()
+    checks: list[tuple[str, str, str]] = []  # (label, status, detail)
+
+    graph = None
+    try:
+        graph = parse_project(project_dir)
+        checks.append(
+            ("ai.yaml parses", "ok", f"'{graph.config.name}', {len(graph.config.agents)} agent(s)")
+        )
+    except Exception as e:
+        checks.append(("ai.yaml parses", "fail", str(e)))
+
+    if graph is not None:
+        models_to_check = [("model.primary", graph.config.model.primary)]
+        if graph.config.model.fallback:
+            models_to_check.append(("model.fallback", graph.config.model.fallback))
+
+        for label, model in models_to_check:
+            if model.startswith("mock/") or model.lower() == "auto":
+                checks.append((label, "ok", f'"{model}" — no key required'))
+                continue
+            try:
+                _check_llm_api_key(model)
+                checks.append((label, "ok", f'"{model}"'))
+            except IntaGrinError as e:
+                checks.append((label, "warn", e.message))
+
+        if graph.config.state_schema:
+            if str(project_dir) not in sys.path:
+                sys.path.insert(0, str(project_dir))
+            try:
+                from .runtime.schema_loader import load_model
+
+                load_model(graph.config.state_schema)
+                checks.append(("state_schema loads", "ok", graph.config.state_schema))
+            except Exception as e:
+                checks.append(("state_schema loads", "fail", str(e)))
+        else:
+            checks.append(
+                (
+                    "state_schema",
+                    "warn",
+                    "not set — write_state accepts any key/type with zero validation (`inta verify` covers this too)",
+                )
+            )
+
+        if graph.config.description:
+            checks.append(("app description", "ok", "set"))
+        else:
+            checks.append(
+                (
+                    "app description",
+                    "warn",
+                    "not set — `description:` at the ai.yaml root is what `inta explain` (and anyone reading "
+                    "this project cold) uses to say what this app is for",
+                )
+            )
+
+        agents_missing_description = sorted(
+            name for name, agent in graph.config.agents.items() if not agent.description
+        )
+        if not agents_missing_description:
+            checks.append(("agent descriptions", "ok", "every agent has one"))
+        else:
+            checks.append(
+                (
+                    "agent descriptions",
+                    "warn",
+                    f"missing on: {', '.join(agents_missing_description)} — `inta explain` has nothing "
+                    "plain-English to say about their role without a `description:`",
+                )
+            )
+
+        mcp_commands = sorted(
+            {
+                tool.command
+                for agent in graph.config.agents.values()
+                for tool in agent.tools
+                if getattr(tool, "type", None) == "mcp"
+            }
+        )
+        if not mcp_commands:
+            checks.append(("MCP server commands", "ok", "none declared"))
+        else:
+            for command in mcp_commands:
+                if shutil.which(command):
+                    checks.append((f"MCP command '{command}'", "ok", "found on PATH"))
+                else:
+                    checks.append(
+                        (
+                            f"MCP command '{command}'",
+                            "fail",
+                            "not found on PATH — the MCP server subprocess can't launch",
+                        )
+                    )
+
+    console.print()
+    for label, status, detail in checks:
+        icon = _DOCTOR_ICONS[status]
+        detail_str = f" [dim]— {detail}[/dim]" if detail else ""
+        console.print(f"  {icon}  {label}{detail_str}")
+    console.print()
+
+    if any(status == "fail" for _, status, _ in checks):
+        console.print("[bold red]doctor found problems that will break a run.[/bold red]")
+        raise typer.Exit(1)
+    if any(status == "warn" for _, status, _ in checks):
+        console.print("[bold yellow]doctor found warnings — inta dev may still work.[/bold yellow]")
+        return
+    console.print("[bold green]All checks passed.[/bold green]")
+
+
+@app.command(name="why")
+def why_command(
+    state_key: str = typer.Argument(..., help="A shared-state key, e.g. user_status"),
+):
+    """
+    Trace where a shared-state key is read across this project: which routers' conditions
+    reference it and which tools[].available_when gates reference it, plus whether it's declared
+    in state_schema. This is a static trace over the parsed ai.yaml, not a runtime guarantee —
+    write_state's key/value are chosen by the LLM at call time from what your prompts instruct
+    it to do, so this command also greps prompts/ and tools/ source for the key as a best-effort
+    "who might write this" hint. Answers the exact gotcha docs/01_Getting_Started.md has to
+    explain in prose: a router referencing a key nothing has written yet doesn't error, it just
+    never fires.
+    """
+    import sys
+
+    project_dir = Path.cwd()
+    try:
+        graph = parse_project(project_dir)
+    except Exception as e:
+        Tracer.log_error(f"Configuration error: {e}")
+        raise typer.Exit(1)
+
+    from .runtime.router import condition_state_keys
+
+    readers: list[str] = []
+    for agent_name, agent_cfg in graph.config.agents.items():
+        for router in agent_cfg.routers:
+            if state_key in condition_state_keys(router.condition):
+                readers.append(
+                    f"router on '{agent_name}' → '{router.target}' if [italic]{router.condition}[/italic]"
+                )
+        for tool in agent_cfg.tools:
+            available_when = getattr(tool, "available_when", None)
+            if available_when and state_key in condition_state_keys(available_when):
+                tool_name = getattr(tool, "name", "?")
+                readers.append(
+                    f"tool gate on '{agent_name}.{tool_name}' if [italic]{available_when}[/italic]"
+                )
+
+    schema_field = False
+    if graph.config.state_schema:
+        if str(project_dir) not in sys.path:
+            sys.path.insert(0, str(project_dir))
+        try:
+            from .runtime.schema_loader import load_model
+
+            model = load_model(graph.config.state_schema)
+            schema_field = state_key in model.model_fields
+        except Exception:
+            pass  # state_schema's own validity is `inta doctor`'s job, not this command's
+
+    mentions: list[Path] = []
+    for pattern in ("prompts/**/*.jinja2", "tools/**/*.py"):
+        for path in sorted(project_dir.glob(pattern)):
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if f'"{state_key}"' in text or f"'{state_key}'" in text:
+                mentions.append(path.relative_to(project_dir))
+
+    console.print(f"\n[bold]{state_key}[/bold]\n")
+
+    console.print("[bold]Read by (exact — parsed from ai.yaml):[/bold]")
+    if readers:
+        for r in readers:
+            console.print(f"  · {r}")
+    else:
+        console.print("  [dim]nothing currently reads this key[/dim]")
+
+    console.print(
+        f"\n[bold]Declared in state_schema:[/bold] "
+        f"{'yes' if schema_field else 'no' + (' (no state_schema configured)' if not graph.config.state_schema else '')}"
+    )
+
+    console.print("\n[bold]Possibly written from (best-effort text match, not guaranteed):[/bold]")
+    if mentions:
+        for m in mentions:
+            console.print(f"  · {m}")
+    else:
+        console.print(
+            f"  [dim]no prompt or tool source mentions \"{state_key}\" — nothing writes it yet[/dim]"
+        )
+    console.print()
+
+
+@app.command(name="explain")
+def explain_command():
+    """
+    Prints a plain-English walkthrough of what this ai.yaml actually defines — for a teammate,
+    reviewer, or non-engineer stakeholder who'd rather not parse YAML to understand the system.
+    Built entirely from the already-parsed config plus each agent's/the app's own `description:`
+    field — `inta doctor` warns when those are missing, since this command has nothing to say
+    about an undescribed agent beyond its name. Read-only, same static-analysis style as `why`.
+    """
+    from .config.schema import MCPToolConfig, OpenAPIToolConfig, SandboxToolConfig, ToolReferenceConfig
+
+    project_dir = Path.cwd()
+    try:
+        graph = parse_project(project_dir)
+    except Exception as e:
+        Tracer.log_error(f"Configuration error: {e}")
+        raise typer.Exit(1)
+
+    cfg = graph.config
+    root_tools_by_name = {t.name: t for t in cfg.tools}
+
+    def tool_kind(tool) -> str:
+        if isinstance(tool, ToolReferenceConfig):
+            root_tool = root_tools_by_name.get(tool.name)
+            return tool_kind(root_tool) if root_tool is not None else "a tool (declared at the ai.yaml root)"
+        if isinstance(tool, MCPToolConfig):
+            return f"an MCP server tool (runs `{tool.command}`)"
+        if isinstance(tool, OpenAPIToolConfig):
+            return f"an OpenAPI tool (calls {tool.url})"
+        if isinstance(tool, SandboxToolConfig):
+            return f"a sandboxed {tool.language} code runner"
+        return "a local Python tool"
+
+    def tool_flags(tool) -> list[str]:
+        # requires_approval/untrusted_output live on the concrete tool, not on a bare
+        # ToolReferenceConfig — resolve to the root-level tool it points at for those.
+        source = root_tools_by_name.get(tool.name) if isinstance(tool, ToolReferenceConfig) else tool
+        if source is None:
+            return []
+        flags = []
+        if getattr(source, "requires_approval", False):
+            flags.append("needs a human to approve every call")
+        if getattr(source, "untrusted_output", False):
+            flags.append("its result is treated as untrusted")
+        return flags
+
+    console.print()
+    if cfg.description:
+        console.print(f"[bold]{cfg.name}[/bold] — {cfg.description}")
+    else:
+        console.print(f"[bold]{cfg.name}[/bold] [dim](no description set — see `inta doctor`)[/dim]")
+    console.print(f"[dim]{len(cfg.agents)} agent(s) · entry point: '{cfg.default_agent}'[/dim]")
+    if cfg.rag:
+        console.print(f"[dim]Can search a knowledge base of documents under '{cfg.rag.docs_dir}'.[/dim]")
+    if cfg.episodic_memory:
+        console.print("[dim]Remembers discrete facts/events across conversations (episodic memory).[/dim]")
+    console.print()
+
+    if cfg.routers:
+        console.print("[bold]Before any agent responds[/bold], these deterministic rules are checked first:")
+        for name, r in cfg.routers.items():
+            desc = f" — {r.description}" if r.description else ""
+            targets = ", ".join(r.possible_targets) if r.possible_targets else "any agent"
+            console.print(f"  · '{name}'{desc} → routes to one of: {targets}")
+        console.print()
+
+    console.print(f"[bold]When a conversation starts[/bold], '{cfg.default_agent}' handles the first message.\n")
+
+    for agent_name, agent in cfg.agents.items():
+        console.print(f"[bold cyan]{agent_name}[/bold cyan]")
+        console.print(f"  {agent.description}" if agent.description else "  [dim](no description set)[/dim]")
+
+        if agent.model_override:
+            console.print(f"  Uses its own model ([italic]{agent.model_override}[/italic]) instead of the app default.")
+
+        if agent.tools:
+            console.print("  Can use these tools:")
+            for t in agent.tools:
+                flags = tool_flags(t)
+                flag_str = f" ({'; '.join(flags)})" if flags else ""
+                console.print(f"    - {t.name}: {tool_kind(t)}{flag_str}")
+
+        if agent.handoffs:
+            console.print(f"  Can hand the conversation over to: {', '.join(agent.handoffs)}")
+
+        if agent.delegations:
+            console.print(
+                f"  Can delegate sub-tasks to: {', '.join(agent.delegations)} "
+                "(waits for their result, doesn't give up control)"
+            )
+
+        for r in agent.routers:
+            if r.condition:
+                console.print(f"  Automatically routes to '{r.target}' (no LLM call) when: {r.condition}")
+            elif r.custom_module:
+                console.print(f"  Automatically routes to '{r.target}' (no LLM call) via custom logic in {r.custom_module}")
+
+        if agent.auto_route:
+            console.print("  Uses semantic routing to automatically pick the next agent in the conversation.")
+
+        if agent.spawns:
+            console.print(
+                f"  Can create temporary specialized sub-agents on the fly "
+                f"(limited to: {', '.join(agent.spawns.tool_pool)})."
+            )
+
+        if agent.skills:
+            skill_names = [s if isinstance(s, str) else s.name for s in agent.skills]
+            console.print(f"  Can load reference material on demand: {', '.join(skill_names)}")
+
+        console.print()
+
+    if cfg.workflows:
+        console.print("[bold]Named multi-step workflows[/bold] (run directly via `inta run`, not conversationally):")
+        for wf_name in cfg.workflows:
+            console.print(f"  · {wf_name}")
+        console.print()
+
+    cb = cfg.circuit_breakers
+    console.print("[bold]Safety limits[/bold] (stop a runaway conversation automatically):")
+    if cb.max_handoffs_per_session:
+        console.print(f"  · at most {cb.max_handoffs_per_session} agent handoffs per conversation")
+    if cb.max_tool_failures_in_a_row:
+        console.print(f"  · stops after {cb.max_tool_failures_in_a_row} tool failures in a row")
+    cost_cap = cb.max_usd_cost_per_session or cfg.max_session_budget_usd
+    if cost_cap:
+        console.print(f"  · stops once a conversation costs more than ${cost_cap:.2f}")
+    console.print(
+        f"  · sub-agent delegation nests at most {cb.max_delegation_depth} levels deep, "
+        f"and a delegated sub-agent is force-stopped after {cb.max_delegation_turns} turns"
+    )
+    console.print()
 
 
 @app.command(name="diagnose")
@@ -2480,5 +2914,91 @@ def db_upgrade(
     except Exception as e:
         Tracer.log_error(f"Migration Error: {e}")
         raise typer.Exit(1)
+
+
+approvers_app = typer.Typer(
+    help="Manage DB-backed reviewer credentials for approving requires_approval tool calls"
+)
+app.add_typer(approvers_app, name="approvers")
+
+
+@approvers_app.command("add")
+def approvers_add(
+    approver_id: str = typer.Argument(..., help="Id for this approver (e.g. 'finance', 'default')")
+):
+    """
+    Issue a new X-Approver-Key credential (or rotate an existing one, same id), stored hashed in
+    the project's own database — no ai.yaml/.env edit or restart needed. The generated secret is
+    shown exactly once; it is not recoverable afterwards (only revoke-and-reissue).
+    """
+    import secrets as _secrets
+
+    from .runtime.approvers import add_approver
+
+    try:
+        project_dir = Path.cwd()
+        graph = parse_project(project_dir)
+        secret = _secrets.token_urlsafe(32)
+        add_approver(graph.config.memory, project_dir, approver_id, secret)
+        console.print(f"[bold green]Approver '{approver_id}' issued.[/bold green]")
+        console.print(
+            "[bold yellow]Save this credential now — it will not be shown again:[/bold yellow]"
+        )
+        console.print(Panel(secret, title="X-Approver-Key", border_style="yellow"))
+        console.print(
+            f"Use it as the [bold]X-Approver-Key[/bold] header when approving via /resume "
+            f"(approver id: [bold]{approver_id}[/bold])."
+        )
+    except Exception as e:
+        Tracer.log_error(f"Approver Add Error: {e}")
+        raise typer.Exit(1)
+
+
+@approvers_app.command("rotate")
+def approvers_rotate(approver_id: str = typer.Argument(..., help="Approver id to rotate")):
+    """Issues a fresh secret for an existing approver id, invalidating the old one immediately."""
+    approvers_add(approver_id)
+
+
+@approvers_app.command("revoke")
+def approvers_revoke(approver_id: str = typer.Argument(..., help="Approver id to revoke")):
+    """Revokes an approver's credential — it can no longer approve via /resume. Kept in the
+    database for audit history rather than deleted."""
+    from .runtime.approvers import revoke_approver
+
+    try:
+        project_dir = Path.cwd()
+        graph = parse_project(project_dir)
+        if revoke_approver(graph.config.memory, project_dir, approver_id):
+            console.print(f"[bold green]Approver '{approver_id}' revoked.[/bold green]")
+        else:
+            console.print(
+                f"[bold yellow]No active approver named '{approver_id}' found.[/bold yellow]"
+            )
+    except Exception as e:
+        Tracer.log_error(f"Approver Revoke Error: {e}")
+        raise typer.Exit(1)
+
+
+@approvers_app.command("list")
+def approvers_list():
+    """Lists every DB-backed approver (active and revoked) — ids and timestamps only, no secrets."""
+    from .runtime.approvers import list_approvers
+
+    try:
+        project_dir = Path.cwd()
+        graph = parse_project(project_dir)
+        rows = list_approvers(graph.config.memory, project_dir)
+        if not rows:
+            console.print("[dim]No DB-backed approvers issued yet.[/dim]")
+            return
+        for row in rows:
+            status = "[bold red]revoked[/bold red]" if row.get("revoked_at") else "[bold green]active[/bold green]"
+            console.print(f"{row['approver_id']:<20} {status:<20} issued {row['created_at']}")
+    except Exception as e:
+        Tracer.log_error(f"Approver List Error: {e}")
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()

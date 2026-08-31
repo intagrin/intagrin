@@ -1,3 +1,4 @@
+import asyncio
 import json
 import math
 from pathlib import Path
@@ -13,6 +14,44 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return dot / (norm_a * norm_b)
+
+
+def _rank_by_embedding(
+    query_embedding: list[float], chunks: list[dict[str, Any]], top_k: int
+) -> list[tuple[float, dict[str, Any]]]:
+    """Ranks chunks by cosine similarity to query_embedding, returning the top_k highest-scoring
+    (score, chunk) pairs. A brute-force, pure-Python O(n·d) scan over every chunk — fine for a
+    knowledge base of a few hundred/thousand chunks, the ceiling for a project without a real
+    vector index (out of scope here — see the module docstring). Computes the query vector's own
+    norm once, up front, rather than recomputing it on every chunk the way calling
+    cosine_similarity(query_embedding, chunk_embedding) in a loop would — cosine_similarity itself
+    stays a simple single-pair function for other single-pair callers (e.g.
+    episodic_memory.py's semantic_search_episodes, capped at 200 candidates)."""
+    scored: list[tuple[float, dict[str, Any]]] = []
+    query_norm = math.sqrt(sum(q * q for q in query_embedding))
+    if query_norm == 0:
+        return scored
+    for c in chunks:
+        embedding = c.get("embedding")
+        if not embedding:
+            continue
+        dot = sum(a * b for a, b in zip(query_embedding, embedding))
+        chunk_norm = math.sqrt(sum(e * e for e in embedding))
+        score = dot / (query_norm * chunk_norm) if chunk_norm else 0.0
+        scored.append((score, c))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[:top_k]
+
+
+def _rank_by_keywords(
+    query: str, chunks: list[dict[str, Any]], top_k: int
+) -> list[tuple[float, dict[str, Any]]]:
+    """Fallback ranking when no query embedding is available (embedding API failure) — plain
+    keyword-overlap count, same O(n) scan shape as _rank_by_embedding."""
+    query_words = set(query.lower().split())
+    scored = [(sum(1 for w in query_words if w in c["text"].lower()), c) for c in chunks]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[:top_k]
 
 
 class VectorRAGEngine:
@@ -171,22 +210,17 @@ class VectorRAGEngine:
         except Exception:
             pass
 
-        scored_chunks = []
+        # Both ranking passes are a pure-Python O(n) scan over every indexed chunk — run off the
+        # event loop thread so a large knowledge base can't stall every other in-flight request
+        # on this process for the duration of one search() call.
         if query_embedding:
-            for c in self.chunks:
-                if c.get("embedding"):
-                    score = cosine_similarity(query_embedding, c["embedding"])
-                    scored_chunks.append((score, c))
-            scored_chunks.sort(key=lambda x: x[0], reverse=True)
+            top_results = await asyncio.to_thread(
+                _rank_by_embedding, query_embedding, self.chunks, self.top_k
+            )
         else:
-            # Fallback keyword ranking
-            query_words = set(query.lower().split())
-            for c in self.chunks:
-                score = sum(1 for w in query_words if w in c["text"].lower())
-                scored_chunks.append((score, c))
-            scored_chunks.sort(key=lambda x: x[0], reverse=True)
-
-        top_results = scored_chunks[: self.top_k]
+            top_results = await asyncio.to_thread(
+                _rank_by_keywords, query, self.chunks, self.top_k
+            )
         if not top_results or top_results[0][0] == 0:
             return f"No relevant context found in documents for query: '{query}'."
 

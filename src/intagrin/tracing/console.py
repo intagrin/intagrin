@@ -192,8 +192,30 @@ class Tracer:
         console.print(Panel(content, title=title, border_style="red"))
 
     @staticmethod
-    def log_cost(tokens: int, cost: float):
-        EventStreamer.emit("cost", {"tokens": tokens, "cost": cost})
+    def log_cost(
+        tokens: int,
+        cost: float,
+        *,
+        model: str | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+    ):
+        """`model`/`prompt_tokens`/`completion_tokens` are additive, optional keyword-only fields
+        (default None, backward compatible with every existing caller) — added so a `cost` event's
+        payload alone carries everything an OTel GenAI-semconv exporter needs
+        (`gen_ai.request.model`, `gen_ai.usage.input_tokens`/`output_tokens`) without having to
+        correlate it against a separate `llm_exchange` event, which carries the model but not the
+        token split. See tracing/otel_exporter.py."""
+        EventStreamer.emit(
+            "cost",
+            {
+                "tokens": tokens,
+                "cost": cost,
+                "model": model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+        )
         if Tracer._json_mode:
             Tracer._print_json(
                 "info", "cost", f"{tokens} tokens, ${cost:.6f}", tokens=tokens, cost=cost

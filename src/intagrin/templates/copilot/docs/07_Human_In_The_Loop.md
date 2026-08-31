@@ -143,3 +143,42 @@ instead of `required_approvers` — any 2 distinct approvers (from `server.auth.
 single `approver_env_var` approver counted as id `"default"`) satisfy it. `required_approvers`
 takes precedence when both are set. Neither field changes anything for tools that don't set
 them — `required_approvals` defaults to `1`, exactly today's single-approval behavior.
+
+## 8. DB-Backed Approver Credentials
+
+`approver_env_var`/`approvers` are fine for local development, but a real deployment usually wants
+to issue and revoke reviewer credentials without editing `ai.yaml`/`.env` and restarting the
+process — and without a plaintext secret sitting in the environment. `runtime/approvers.py` stores
+credentials **hashed and salted** (stdlib `hashlib.scrypt`) in the project's own database (the same
+sqlite/postgres store `checkpoints`/`run_logs` already use — no separate service to run).
+
+Manage them via the CLI:
+```bash
+inta approvers add finance      # issues a new secret, printed exactly once
+inta approvers rotate finance   # same id, fresh secret — invalidates the old one immediately
+inta approvers revoke finance   # can no longer approve via /resume; kept for audit history
+inta approvers list             # ids + issued/revoked status only, never secrets
+```
+
+Or over HTTP, for a consumer's own admin site/tooling. This is a **separate, more privileged
+credential tier** from both the requester's own session auth and any individual approver's own
+`X-Approver-Key` — set `server.auth.admin_env_var` to enable it (unset means these three endpoints
+are disabled outright, `503`, not open):
+```yaml
+server:
+  auth:
+    type: api_key
+    env_var: INTAGRIN_API_KEY          # requester auth
+    admin_env_var: INTAGRIN_ADMIN_KEY  # required to manage approvers below
+```
+```
+POST   /approvers              {"approver_id": "finance"}   -> {"approver_id", "secret"}  (once)
+GET    /approvers                                            -> {"approvers": [...]}
+DELETE /approvers/{approver_id}
+```
+all three require `Authorization: Bearer <INTAGRIN_ADMIN_KEY value>`.
+
+Whichever way a credential is issued, it's used identically at resume time — as the
+`X-Approver-Key` header described in sections 4 and 7 above. DB-backed and env-var-configured
+approvers can be mixed freely in the same project; `identify_approver` checks the database first,
+then falls back to `approver_env_var`/`approvers`.

@@ -2,14 +2,37 @@ import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from pydantic import ValidationError
+
 from intagrin.compiler.parser import ExecutionGraph
 from intagrin.config.schema import (
     AgentConfig,
     AppConfig,
+    LocalToolConfig,
     MemoryConfig,
     ModelConfig,
+    ToolReferenceConfig,
 )
 from intagrin.runtime.engine import RuntimeEngine
+
+
+def test_extra_field_on_a_config_model_is_rejected_not_silently_dropped():
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        AgentConfig(auto_route=True, tool_pool=["should not exist on AgentConfig"])
+
+
+def test_tool_union_resolves_a_local_tool_dict_to_local_tool_config_only():
+    # Before extra="forbid", a {name, module} dict could also validate as ToolReferenceConfig
+    # (which just silently drops `module`), leaving the union match to Pydantic's own
+    # tie-breaking instead of the shape of the data.
+    agent = AgentConfig(tools=[{"name": "my_tool", "module": "tools.custom_tools"}])
+    assert isinstance(agent.tools[0], LocalToolConfig)
+
+
+def test_tool_union_resolves_a_bare_name_dict_to_tool_reference_config():
+    agent = AgentConfig(tools=[{"name": "shared_tool"}])
+    assert isinstance(agent.tools[0], ToolReferenceConfig)
 
 STATE_SCHEMA_MODULE = """
 from pydantic import BaseModel, ConfigDict

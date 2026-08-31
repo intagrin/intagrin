@@ -19,6 +19,7 @@ def test_every_code_matches_its_category_prefix():
         "Runtime": "IG-RT-",
         "MCP Integration": "IG-MCP-",
         "Server & API": "IG-SRV-",
+        "A2A Integration": "IG-A2A-",
     }
     for code, spec in ERRORS.items():
         expected_prefix = prefix_by_category[spec.category]

@@ -28,7 +28,12 @@ def _fake_llm_response(names: list[str]):
 
 def test_repeated_trajectory_reuses_prior_selection_without_a_new_llm_call():
     """Two get_active_tools() calls with the same recent trajectory and schema set must only
-    call the router LLM once — the second is served from the engine's per-turn debounce cache."""
+    call the router LLM once — the second is served from the engine's per-turn debounce cache.
+
+    Forces the embedding fast path (ToolRunner._select_tools_by_embedding) to report "no
+    embedding provider available" via embed_text returning None, so this test exercises the
+    LLM-based fallback deterministically — it must not depend on whether OPENAI_API_KEY (or
+    whatever the embedding_model resolves to) happens to be set in the environment running it."""
 
     async def run():
         config = AppConfig(
@@ -52,7 +57,10 @@ def test_repeated_trajectory_reuses_prior_selection_without_a_new_llm_call():
             call_count["n"] += 1
             return _fake_llm_response(["tool_2"])
 
-        with patch("intagrin.runtime.tool_runner.litellm.acompletion", side_effect=fake_acompletion):
+        with (
+            patch("intagrin.runtime.tool_runner.litellm.acompletion", side_effect=fake_acompletion),
+            patch("intagrin.runtime.episodic_memory.embed_text", return_value=None),
+        ):
             first = await ToolRunner.get_active_tools(engine, agent_cfg, schemas)
             second = await ToolRunner.get_active_tools(engine, agent_cfg, schemas)
 
@@ -66,7 +74,10 @@ def test_repeated_trajectory_reuses_prior_selection_without_a_new_llm_call():
 
 
 def test_changed_trajectory_triggers_a_fresh_selection():
-    """A new message changes the trajectory, so the debounce cache must miss and re-query."""
+    """A new message changes the trajectory, so the debounce cache must miss and re-query.
+
+    Forces the embedding fast path to report "no embedding provider available" (see the
+    previous test's docstring) so this exercises the LLM-based fallback deterministically."""
 
     async def run():
         config = AppConfig(
@@ -90,7 +101,10 @@ def test_changed_trajectory_triggers_a_fresh_selection():
             call_count["n"] += 1
             return _fake_llm_response(["tool_3"])
 
-        with patch("intagrin.runtime.tool_runner.litellm.acompletion", side_effect=fake_acompletion):
+        with (
+            patch("intagrin.runtime.tool_runner.litellm.acompletion", side_effect=fake_acompletion),
+            patch("intagrin.runtime.episodic_memory.embed_text", return_value=None),
+        ):
             await ToolRunner.get_active_tools(engine, agent_cfg, schemas)
             engine.messages.append({"role": "assistant", "content": "using tool_2 now"})
             await ToolRunner.get_active_tools(engine, agent_cfg, schemas)

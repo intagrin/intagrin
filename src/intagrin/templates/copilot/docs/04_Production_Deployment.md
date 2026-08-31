@@ -13,7 +13,7 @@ To spin it up locally:
 docker compose up -d --build
 ```
 
-To push it to AWS, GCP, or Railway, simply deploy the generated `Dockerfile`. Because IntaGrin relies on a standard FastAPI backend, it scales beautifully across serverless environments.
+To push it to AWS, GCP, or Railway, simply deploy the generated `Dockerfile`. Because IntaGrin relies on a standard FastAPI backend, it scales well horizontally for throughput — but read "Concurrency & Multi-Process Deployment" below before running more than one process/replica of the same project: one specific correctness guarantee (the per-session lock) is deliberately process-local, not distributed.
 
 ## Runtime Resource Pooling
 
@@ -43,6 +43,50 @@ same for every session against a given project.
 *within* a single request also skip redundant rebuilds — a `delegate_task` call or a parallel
 workflow branch inherits its parent engine's already-built tools/connections instead of
 reconnecting from scratch mid-request.
+
+## Concurrency & Multi-Process Deployment
+
+**Per-session locking is process-local, not distributed.** `/chat`, `/chat/stream`, `/resume`, and
+`/stream` serialize concurrent requests for the *same* `session_id` via an in-process lock
+registry (`runtime/session_locks.py`) — closing the "double-click / client retry / two open tabs"
+race where one request's checkpoint save silently clobbers another's. This lock only sees requests
+handled by its own process. Running more than one `inta serve` process (multiple uvicorn workers,
+multiple container replicas, multiple serverless instances) for the same project means two
+concurrent requests for the same session *can* land on different processes and race — a lost
+checkpoint write, or, in the worst case, a side-effecting tool call executing twice. If your
+deployment fans out across processes, either route by `session_id` (sticky sessions at the load
+balancer) so the same session always reaches the same process, or accept that cross-process
+same-session collisions are a known, unresolved edge case for now — there is no distributed lock
+built in. The lock registry itself is reference-counted, not a fixed-size cache: it holds an entry
+only for sessions with a request genuinely in flight right now, so its memory footprint tracks
+concurrent load, not lifetime session count.
+
+**One-off Postgres writes are pooled, not opened-and-closed per call.** Audit logging
+(`run_logs`, one row per API call), rate-limit checks, DB-backed approver lookups
+(`runtime/approvers.py`), and shared/episodic memory reads and writes all borrow a connection from
+the same process-wide pool `PostgresCheckpointer` itself uses (`runtime/memory.py`'s
+`pooled_postgres_connection`, keyed by connection URL) instead of opening a fresh connection per
+call — avoids adding a TCP+auth round-trip to every request and reduces pressure on Postgres's own
+`max_connections` under bursty load.
+
+**Audit-log and episode tables have no retention by default.** `run_logs` (one row per API call)
+and, if `episodic_memory:` is configured, `episodes` (one row per `remember_episode` call) are both
+append-only with no automatic cleanup unless you opt in — they will grow for as long as the project
+runs. Set retention explicitly once you're running this in production for real:
+
+```yaml
+memory:
+  run_log_retention_days: 90   # None (default) keeps every run_logs row forever
+
+episodic_memory:
+  retention_days: 90            # None (default) keeps every episode forever
+```
+
+Pruning is opportunistic (a small random fraction of writes also runs one indexed `DELETE ...
+WHERE created_at < cutoff`) rather than a scheduled job — no extra cron/infrastructure needed, at
+the cost of old rows disappearing "eventually" rather than exactly at the boundary. `run_logs` is
+also what `server.rate_limit` queries on every single request, so retention keeps that query fast
+as well as keeping the table itself bounded.
 
 ## Shadow Replay: `inta simulate`
 

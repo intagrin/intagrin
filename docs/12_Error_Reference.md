@@ -4,6 +4,13 @@ Every codified IntaGrin error is listed below, grouped by category. Errors not y
 
 This file is generated from `src/intagrin/errors.py` by `scripts/generate_error_docs.py` — do not hand-edit it.
 
+## A2A Integration
+
+| Code | Title | Possible Causes |
+|---|---|---|
+| `IG-A2A-001` | Malformed A2A JSON-RPC request | A request to POST /a2a wasn't valid JSON-RPC 2.0 (missing `jsonrpc`/`method`, or a `params` shape the target method doesn't recognize). Check the request against the A2A protocol spec's message/send or message/stream schema. |
+| `IG-A2A-002` | Unsupported A2A method | A request to POST /a2a named a JSON-RPC `method` IntaGrin's A2A surface doesn't implement. Supported methods: message/send, message/stream, tasks/get. Push notifications and delegated auth chains are explicitly out of scope — see docs/16_A2A_Interoperability.md. |
+
 ## CLI Usage
 
 | Code | Title | Possible Causes |
@@ -31,6 +38,7 @@ This file is generated from `src/intagrin/errors.py` by `scripts/generate_error_
 | Code | Title | Possible Causes |
 |---|---|---|
 | `IG-MCP-001` | MCP tool not found | An agent (or the LLM mid-conversation) tried to call a tool name that no connected MCP server exposes — usually a stale or incorrect tool name in a prompt, or the MCP server process didn't register the tool that was expected. |
+| `IG-MCP-002` | MCP background task failed or was lost | A long-running MCP tool call (the MCP 'Tasks' extension — a server claimed the call instead of returning a result immediately) either reported a failure status, exceeded the tool's `max_task_wait_seconds`, or the task id is no longer known to the server (e.g. the MCP server process restarted). The task cannot be resumed; the agent should be told to retry the original tool call. |
 
 ## Runtime
 
@@ -44,6 +52,7 @@ This file is generated from `src/intagrin/errors.py` by `scripts/generate_error_
 | `IG-RT-006` | Local tool failed to load | A `type: local` tool in `ai.yaml` references a Python module or function that doesn't exist or fails to import — a typo in `module`/`name`, a missing dependency, or a syntax error inside `tools/*.py`. |
 | `IG-RT-007` | Circuit breaker tripped — session halted | A session hit `circuit_breakers.max_handoffs_per_session` or `max_tool_failures_in_a_row`. This is a deliberate stop, not a bug: the session was looping (repeated handoffs via transfer_agent, a conditional/root router, or auto_route semantic routing) or a tool kept failing on consecutive calls. Raise the relevant `circuit_breakers` threshold in `ai.yaml` if the limit is too tight for a legitimate long-running task, or fix the underlying loop/failing tool. |
 | `IG-RT-008` | Rate limit exceeded | One authenticated caller hit a `server.rate_limit` threshold — `max_requests_per_window`, `max_cost_per_caller_per_day`, or `max_tokens_per_caller_per_day` — measured from that caller's rows in the run_logs audit table. This is a deliberate stop, not a bug: either the caller is making more requests than the configured quota allows, or the threshold in `ai.yaml` is too tight for legitimate traffic and should be raised. |
+| `IG-RT-009` | OTLP span exporter not installed | An `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable is set (requesting real OTLP export) but the `opentelemetry-exporter-otlp-proto-http` package isn't installed. Run `pip install "intagrin[otel]"`, or unset the endpoint to fall back to console-only span output. |
 
 ## Server & API
 

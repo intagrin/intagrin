@@ -247,6 +247,52 @@ _SPECS: list[ErrorSpec] = [
         ),
     ),
     ErrorSpec(
+        code="IG-MCP-002",
+        category="MCP Integration",
+        title="MCP background task failed or was lost",
+        causes=(
+            "A long-running MCP tool call (the MCP 'Tasks' extension — a server claimed the "
+            "call instead of returning a result immediately) either reported a failure status, "
+            "exceeded the tool's `max_task_wait_seconds`, or the task id is no longer known to "
+            "the server (e.g. the MCP server process restarted). The task cannot be resumed; "
+            "the agent should be told to retry the original tool call."
+        ),
+    ),
+    ErrorSpec(
+        code="IG-RT-009",
+        category="Runtime",
+        title="OTLP span exporter not installed",
+        causes=(
+            "An `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable is set (requesting real OTLP "
+            "export) but the `opentelemetry-exporter-otlp-proto-http` package isn't installed. "
+            "Run `pip install \"intagrin[otel]\"`, or unset the endpoint to fall back to "
+            "console-only span output."
+        ),
+    ),
+    ErrorSpec(
+        code="IG-A2A-001",
+        category="A2A Integration",
+        title="Malformed A2A JSON-RPC request",
+        causes=(
+            "A request to POST /a2a wasn't valid JSON-RPC 2.0 (missing `jsonrpc`/`method`, or a "
+            "`params` shape the target method doesn't recognize). Check the request against the "
+            "A2A protocol spec's message/send or message/stream schema."
+        ),
+        default_http_status=400,
+    ),
+    ErrorSpec(
+        code="IG-A2A-002",
+        category="A2A Integration",
+        title="Unsupported A2A method",
+        causes=(
+            "A request to POST /a2a named a JSON-RPC `method` IntaGrin's A2A surface doesn't "
+            "implement. Supported methods: message/send, message/stream, tasks/get. Push "
+            "notifications and delegated auth chains are explicitly out of scope — see "
+            "docs/16_A2A_Interoperability.md."
+        ),
+        default_http_status=400,
+    ),
+    ErrorSpec(
         code="IG-SRV-001",
         category="Server & API",
         title="Server misconfigured: auth secret not set",

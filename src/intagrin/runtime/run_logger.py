@@ -9,12 +9,27 @@ Scoped to `memory.type` in ("sqlite", "postgres") only — the same scope auto_m
 uses, for the same reason: no natural place to persist this otherwise.
 """
 import os
+import random
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from ..errors import IntaGrinError
 from ..tracing.console import Tracer
-from .memory import postgres_connect
+from .memory import pooled_postgres_connection
+
+# What fraction of record_run_log calls also run a pruning pass when memory.run_log_retention_days
+# is set — opportunistic instead of an external cron job, and rare enough that the extra indexed
+# DELETE's cost is negligible when amortized over every write on this hot path.
+_PRUNE_PROBABILITY = 1 / 200
+
+# _get_or_create_pg_pool (behind pooled_postgres_connection) raises IntaGrinError("IG-RT-004",
+# ...) instead of a plain ImportError when neither psycopg driver is installed — caught
+# alongside ImportError everywhere this module used to only expect the latter, so a missing
+# driver still no-ops (or, in record_run_log, is quietly absorbed by its own outer catch-all)
+# exactly as before, rather than surfacing as a differently-shaped error.
+_NO_DRIVER_ERRORS = (ImportError, IntaGrinError)
 
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_logs (
@@ -102,14 +117,13 @@ def ensure_schema(mem_cfg, project_dir: Path) -> None:
         if not conn_url:
             return
         try:
-            conn = postgres_connect(conn_url)
-        except ImportError:
+            with pooled_postgres_connection(conn_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_POSTGRES_SCHEMA)
+                    cur.execute(_POSTGRES_INDEX)
+                conn.commit()
+        except _NO_DRIVER_ERRORS:
             return
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(_POSTGRES_SCHEMA)
-                cur.execute(_POSTGRES_INDEX)
-            conn.commit()
 
 
 def record_run_log(mem_cfg, project_dir: Path, **fields: Any) -> None:
@@ -137,16 +151,50 @@ def record_run_log(mem_cfg, project_dir: Path, **fields: Any) -> None:
             if not conn_url:
                 return
             try:
-                conn = postgres_connect(conn_url)
-            except ImportError:
+                with pooled_postgres_connection(conn_url) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"INSERT INTO run_logs ({', '.join(_COLUMNS)}) "
+                            f"VALUES ({', '.join('%s' for _ in _COLUMNS)})",
+                            values,
+                        )
+                    conn.commit()
+            except _NO_DRIVER_ERRORS:
                 return
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"INSERT INTO run_logs ({', '.join(_COLUMNS)}) "
-                        f"VALUES ({', '.join('%s' for _ in _COLUMNS)})",
-                        values,
-                    )
-                conn.commit()
+
+        _maybe_prune_old_rows(mem_cfg, project_dir)
     except Exception as e:
         Tracer.log_error(f"Run Log Write Error: {e}")
+
+
+def _maybe_prune_old_rows(mem_cfg, project_dir: Path) -> None:
+    """Opportunistically deletes run_logs rows older than memory.run_log_retention_days, on a
+    small random fraction of writes (see _PRUNE_PROBABILITY) — keeps the table bounded over a
+    long production lifetime without needing an external cron job. No-ops when retention isn't
+    configured (the default, via getattr since some callers pass a bare mem_cfg without the
+    field) or on this call's random miss. Failures propagate to record_run_log's own best-effort
+    outer catch — a failed prune must never break the write that just succeeded."""
+    retention_days = getattr(mem_cfg, "run_log_retention_days", None)
+    if not retention_days or random.random() >= _PRUNE_PROBABILITY:
+        return
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+
+    if mem_cfg.type == "sqlite":
+        db_path = project_dir / (mem_cfg.db_path or ".ai/memory.db")
+        with sqlite3.connect(str(db_path), timeout=15.0) as conn:
+            conn.execute(
+                "DELETE FROM run_logs WHERE created_at < ?",
+                (cutoff.strftime("%Y-%m-%d %H:%M:%S"),),
+            )
+            conn.commit()
+    else:
+        conn_url = _resolve_postgres_url(mem_cfg)
+        if not conn_url:
+            return
+        try:
+            with pooled_postgres_connection(conn_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM run_logs WHERE created_at < %s", (cutoff,))
+                conn.commit()
+        except _NO_DRIVER_ERRORS:
+            return

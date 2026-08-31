@@ -255,3 +255,58 @@ def test_engine_reusing_shared_resources_rebinds_episodic_tools_per_session(tmp_
         assert "real session's own episode" in engine_recall
 
     asyncio.run(_run())
+
+
+def test_retention_days_prunes_old_episodes_but_keeps_recent_ones(tmp_path):
+    """episodes is append-only with no automatic pruning by default — retention_days (from
+    EpisodicMemoryConfig, threaded through save_episode as a plain value) opportunistically
+    deletes rows older than the cutoff. Forces the random trigger deterministically via
+    monkeypatch instead of relying on its real ~0.5% probability."""
+    import sqlite3
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    mem_cfg = _sqlite_mem_cfg()
+    save_episode(mem_cfg, tmp_path, "acme", "s1", "note", "old episode", None, None)
+
+    db_path = tmp_path / (mem_cfg.db_path or ".ai/memory.db")
+    old_created_at = (datetime.now(UTC) - timedelta(days=100)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "UPDATE episodes SET created_at = ? WHERE content = 'old episode'", (old_created_at,)
+        )
+        conn.commit()
+
+    with patch("intagrin.runtime.episodic_memory.random.random", return_value=0.0):
+        save_episode(mem_cfg, tmp_path, "acme", "s1", "note", "new episode", None, None, retention_days=30)
+
+    remaining = query_episodes(mem_cfg, tmp_path, "acme", None, None, limit=10)
+    contents = {r["content"] for r in remaining}
+    assert "new episode" in contents
+    assert "old episode" not in contents
+
+
+def test_retention_days_none_never_prunes(tmp_path):
+    """The default (retention_days=None) must not prune anything, even on the lucky random roll —
+    pruning is strictly opt-in."""
+    import sqlite3
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    mem_cfg = _sqlite_mem_cfg()
+    save_episode(mem_cfg, tmp_path, "acme", "s1", "note", "ancient episode", None, None)
+
+    db_path = tmp_path / (mem_cfg.db_path or ".ai/memory.db")
+    old_created_at = (datetime.now(UTC) - timedelta(days=9999)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "UPDATE episodes SET created_at = ? WHERE content = 'ancient episode'", (old_created_at,)
+        )
+        conn.commit()
+
+    with patch("intagrin.runtime.episodic_memory.random.random", return_value=0.0):
+        save_episode(mem_cfg, tmp_path, "acme", "s1", "note", "another episode", None, None)
+
+    remaining = query_episodes(mem_cfg, tmp_path, "acme", None, None, limit=10)
+    contents = {r["content"] for r in remaining}
+    assert "ancient episode" in contents

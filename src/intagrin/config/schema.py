@@ -1,9 +1,27 @@
 from typing import Any, Literal, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class AuthConfig(BaseModel):
+class StrictBaseModel(BaseModel):
+    """Base for every ai.yaml config model: rejects unknown fields instead of silently dropping
+    them (Pydantic v2's default `extra="ignore"`). Without this, a typo'd key (`toolz` instead of
+    `tools`) or a stale/renamed field validated as a no-op — no error at parse time, no warning at
+    runtime, the agent just silently didn't get the tool. The strict `additionalProperties: false`
+    JSON Schema in `json_schema.py` only ever protected editors that enforce the
+    `yaml-language-server` directive; this makes the same guarantee hold for `parse_project`,
+    `validate_config_dict`, and every other real construction path, matching what
+    `_generate_and_validate_wizard_config`'s own docstring already assumed was true. Also sharpens
+    the untagged tool unions (`LocalToolConfig | ... | ToolReferenceConfig`, no `discriminator=`):
+    with `extra="ignore"`, a `{name, module}` dict could validate against both LocalToolConfig
+    -and- ToolReferenceConfig (the latter just silently dropping `module`), leaving Pydantic's
+    union-member choice to its internal tie-breaking; forbidding extras means only the member
+    whose actual fields match wins."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class AuthConfig(StrictBaseModel):
     type: Literal["api_key", "custom", "none"] = Field(
         default="none",
         description=(
@@ -50,9 +68,25 @@ class AuthConfig(BaseModel):
             "keep a single default approver alongside named ones."
         ),
     )
+    admin_env_var: str | None = Field(
+        default=None,
+        description=(
+            "Environment variable holding the secret required (as an `Authorization: Bearer` "
+            "token) to call the approver-management endpoints (POST/GET /approvers, DELETE "
+            "/approvers/{id}) — issuing, listing, and revoking the DB-backed reviewer credentials "
+            "from runtime/approvers.py over HTTP instead of only via `inta approvers` locally, so "
+            "a consumer's own admin site/tooling can manage them. Deliberately its own credential "
+            "tier, separate from both the main session auth (`env_var`) and any individual "
+            "approver's own X-Approver-Key — without that separation, whoever holds the main API "
+            "key could mint themselves an approver credential and immediately approve their own "
+            "gated tool call. Unset (default) disables these endpoints entirely (503) rather than "
+            "falling back to any other credential, since there is no pre-existing behavior on "
+            "these endpoints to preserve."
+        ),
+    )
 
 
-class RateLimitConfig(BaseModel):
+class RateLimitConfig(StrictBaseModel):
     max_requests_per_window: int | None = Field(
         default=None,
         description=(
@@ -83,7 +117,7 @@ class RateLimitConfig(BaseModel):
     )
 
 
-class ServerConfig(BaseModel):
+class ServerConfig(StrictBaseModel):
     auth: AuthConfig = Field(
         default_factory=AuthConfig,
         description=(
@@ -106,7 +140,7 @@ class ServerConfig(BaseModel):
     )
 
 
-class GuardrailsConfig(BaseModel):
+class GuardrailsConfig(StrictBaseModel):
     banned_words: list[str] = Field(
         default_factory=list,
         description=(
@@ -137,14 +171,14 @@ class GuardrailsConfig(BaseModel):
     )
 
 
-class ModelVariantConfig(BaseModel):
+class ModelVariantConfig(StrictBaseModel):
     model: str = Field(description="LiteLLM model identifier for this variant.")
     weight: float = Field(
         gt=0.0, description="Relative weight for traffic splitting — weights don't need to sum to 1."
     )
 
 
-class ModelConfig(BaseModel):
+class ModelConfig(StrictBaseModel):
     primary: str = Field(
         description=(
             "LiteLLM model identifier used for this agent/app (e.g. 'openai/gpt-4o-mini', "
@@ -164,6 +198,27 @@ class ModelConfig(BaseModel):
             "(default) means every session uses `primary`, exactly today's behavior."
         ),
     )
+    cascade: list[str] | None = Field(
+        default=None,
+        description=(
+            "Ordered cheap-to-expensive LiteLLM model identifiers tried for an agent's "
+            "response_schema-validated answer — the whole turn (including any tool calls it "
+            "makes) runs on cascade[0] instead of `primary`, escalating to the next tier only "
+            "when the terminal response fails response_schema validation. Ignored entirely for "
+            "an agent without response_schema set: schema pass/fail is the only free, already-"
+            "computed confidence signal this framework has for judging whether a cheaper model's "
+            "answer was good enough — there's no generic way to judge an unstructured chat "
+            "answer without spending another LLM call, which would eat into exactly the savings "
+            "this exists to provide. Escalation only ever regenerates the already-terminal text "
+            "response off the existing message history — it never re-executes any tool calls the "
+            "turn already made, so it's safe regardless of what tools the agent used along the "
+            "way. `primary` is always the final escalation tier regardless of what's listed here, "
+            "so a cascade can never produce a worse ceiling than not configuring one at all. "
+            "Lower priority than both `model_override` and a resolved `variants` assignment — an "
+            "explicit per-agent override or an active A/B experiment both win over an automatic "
+            "cost cascade."
+        ),
+    )
     temperature: float = Field(
         default=0.2,
         ge=0.0,
@@ -176,13 +231,27 @@ class ModelConfig(BaseModel):
     use_cache: bool = Field(
         default=False, description="Enable semantic caching to save API costs"
     )
+    enable_prompt_caching: bool = Field(
+        default=True,
+        description=(
+            "Automatically mark the system prompt and the trailing turn with Anthropic-style "
+            "cache_control breakpoints (sets litellm.enable_anthropic_prompt_caching) so a "
+            "stable system-prompt/tool-schema prefix is billed once and reused across turns "
+            "instead of being re-priced as fresh input tokens every turn. Safe to leave on "
+            "regardless of provider: LiteLLM only actually injects breakpoints for "
+            "Anthropic/Bedrock Claude models that report prompt-caching support, and stands "
+            "down entirely if a request already carries its own cache_control. Unrelated to "
+            "`use_cache` (LiteLLM's semantic response cache, a full-response cache-hit "
+            "feature) — this caches the prompt prefix itself, not the response."
+        ),
+    )
     guardrails: GuardrailsConfig = Field(
         default_factory=GuardrailsConfig,
         description="Content-safety checks applied to this model's inputs/outputs.",
     )
 
 
-class MemoryConfig(BaseModel):
+class MemoryConfig(StrictBaseModel):
     type: Literal[
         "sliding_window", "buffer", "sqlite", "postgres", "redis", "custom"
     ] = Field(
@@ -231,9 +300,22 @@ class MemoryConfig(BaseModel):
             "the same scope — no merge/versioning."
         ),
     )
+    run_log_retention_days: int | None = Field(
+        default=None,
+        description=(
+            "Age (in days) after which run_logs rows (one per API-triggered /chat, /chat/stream, "
+            "/resume, /stream call — see runtime/run_logger.py) are deleted. None (default) means "
+            "no automatic pruning — run_logs grows forever, which also slows down the rate "
+            "limiter's own queries against it (runtime/rate_limiter.py scans this same table on "
+            "every request) as the table grows over a long production lifetime. Enforced "
+            "opportunistically (a small random chance on each record_run_log write triggers a "
+            "single indexed DELETE) rather than needing an external cron job — sqlite/postgres "
+            "only, same scope as run_logs itself."
+        ),
+    )
 
 
-class ConditionFunctionConfig(BaseModel):
+class ConditionFunctionConfig(StrictBaseModel):
     name: str = Field(
         description=(
             "Name a routers[].condition or tools[].available_when expression can call, e.g. "
@@ -253,7 +335,7 @@ class ConditionFunctionConfig(BaseModel):
     )
 
 
-class LocalToolConfig(BaseModel):
+class LocalToolConfig(StrictBaseModel):
     name: str = Field(
         description="Tool name exposed to the LLM for tool-calling — must match the Python function name."
     )
@@ -308,7 +390,7 @@ class LocalToolConfig(BaseModel):
     )
 
 
-class MCPToolConfig(BaseModel):
+class MCPToolConfig(StrictBaseModel):
     name: str = Field(description="Tool name exposed to the LLM for tool-calling.")
     type: Literal["mcp"] = Field(description="Discriminator — must be the literal string 'mcp'.")
     command: str = Field(
@@ -316,6 +398,26 @@ class MCPToolConfig(BaseModel):
     )
     args: list[str] = Field(
         description="Arguments passed to `command` when launching the MCP server."
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Environment variables set on the MCP server subprocess in addition to the parent "
+            "process's own environment — e.g. an API key a specific MCP server needs that "
+            "shouldn't be exported globally."
+        ),
+    )
+    max_task_wait_seconds: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "For MCP servers that support the Tasks extension (long-running tool calls claimed "
+            "instead of answered immediately): the longest the auto-registered "
+            "check_mcp_task_status tool will consider a task still legitimately running before "
+            "reporting it as failed (IG-MCP-002). None (default) means no cap — matches today's "
+            "behavior for servers that don't use Tasks, and leaves genuinely long-running tasks "
+            "unbounded on servers that do. Ignored entirely for a server that never claims a task."
+        ),
     )
     requires_approval: bool = Field(
         default=False, description="Require human-in-the-loop approval before this tool actually executes."
@@ -356,7 +458,7 @@ class MCPToolConfig(BaseModel):
     )
 
 
-class OpenAPIToolConfig(BaseModel):
+class OpenAPIToolConfig(StrictBaseModel):
     name: str = Field(description="Tool name exposed to the LLM for tool-calling.")
     type: Literal["openapi"] = Field(
         description="Discriminator — must be the literal string 'openapi'."
@@ -407,7 +509,7 @@ class OpenAPIToolConfig(BaseModel):
     )
 
 
-class SandboxToolConfig(BaseModel):
+class SandboxToolConfig(StrictBaseModel):
     """Runs agent-generated code in an isolated subprocess (see runtime/sandbox.py for exactly
     what is and isn't isolated — process/resource/environment isolation, NOT a filesystem or
     network security boundary). The missing piece between the coding-agent template's coder/
@@ -481,7 +583,7 @@ class SandboxToolConfig(BaseModel):
 ToolConfig = Union[LocalToolConfig, MCPToolConfig, OpenAPIToolConfig, SandboxToolConfig]
 
 
-class ToolReferenceConfig(BaseModel):
+class ToolReferenceConfig(StrictBaseModel):
     """Reference a tool or MCP/OpenAPI provider declared at the root level."""
 
     name: str = Field(
@@ -501,7 +603,49 @@ class ToolReferenceConfig(BaseModel):
     )
 
 
-class RouterConfig(BaseModel):
+class SkillConfig(StrictBaseModel):
+    """A reusable, progressive-disclosure instruction bundle — the ai.yaml-native "Agent Skills"
+    primitive (distinct from the `inta copilot` IDE skill-folder convention under
+    templates/copilot/skills, which is an unrelated developer-tooling concept). Declared once at
+    the ai.yaml root, referenced by name from any agent's `skills:` list. Advertised to the model
+    cheaply — just this name + description, folded into the auto-registered `load_skill` tool's
+    JSON schema — with the full body only loaded into context on demand via `load_skill(name)`,
+    to avoid the "always-on prompt bulk" that contributes to context rot."""
+
+    name: str = Field(description="Skill name, referenced from agents[].skills.")
+    description: str = Field(
+        description=(
+            "One-line summary of when this skill should be used — shown to the model in "
+            "load_skill's tool schema so it can decide whether to load the full skill without "
+            "paying the cost of loading it."
+        )
+    )
+    path: str = Field(
+        description=(
+            "Path (relative to the project directory) to this skill's content — either a single "
+            "Markdown/text file, or a directory containing a main instructions file plus "
+            "resource files readable via read_skill_resource. Resolved and existence-checked by "
+            "`inta verify`."
+        )
+    )
+
+
+class SkillReferenceConfig(StrictBaseModel):
+    """Reference a skill declared at the root level from a specific agent's `skills:` list."""
+
+    name: str = Field(description="Name of a skill declared at the ai.yaml root (skills:).")
+    available_when: str | None = Field(
+        default=None,
+        description=(
+            "State condition (same restricted grammar as routers[].condition) gating whether "
+            "this skill is even offered to this agent this turn — see "
+            "LocalToolConfig.available_when for the full explanation. None (default) means "
+            "always available, today's behavior."
+        ),
+    )
+
+
+class RouterConfig(StrictBaseModel):
     condition: str | None = Field(
         default=None,
         description='Python evaluation string against state (e.g., "balance < 0")',
@@ -512,12 +656,12 @@ class RouterConfig(BaseModel):
     target: str = Field(description="Agent to route to when this router fires.")
 
 
-class StateWriteAction(BaseModel):
+class StateWriteAction(StrictBaseModel):
     key: str = Field(description="State key to write.")
     value: Any = Field(description="Value to write — the same JSON-ish value write_state accepts.")
 
 
-class AgentSpawningConfig(BaseModel):
+class AgentSpawningConfig(StrictBaseModel):
     tool_pool: list[str] = Field(
         description=(
             "Closed allow-list of already-declared tool names a dynamically-created sub-agent's "
@@ -598,7 +742,7 @@ class AgentSpawningConfig(BaseModel):
     )
 
 
-class AgentConfig(BaseModel):
+class AgentConfig(StrictBaseModel):
     description: str | None = Field(
         default=None,
         description="Short human-readable summary of this agent's purpose — shown in the Monitor dashboard graph.",
@@ -680,6 +824,16 @@ class AgentConfig(BaseModel):
             "anything — today's behavior."
         ),
     )
+    skills: list[SkillReferenceConfig | str] = Field(
+        default_factory=list,
+        description=(
+            "Agent Skills (see SkillConfig) this agent may load — references to skills declared "
+            "in the ai.yaml root `skills:` list, either as a bare name string or a "
+            "SkillReferenceConfig with an `available_when` gate. When non-empty, auto-registers "
+            "a load_skill tool (enum-constrained to these names) and, for any referenced skill "
+            "whose path is a directory, a read_skill_resource tool."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_spawns_tool_pool_is_a_subset_of_own_tools(self) -> "AgentConfig":
@@ -699,7 +853,7 @@ class AgentConfig(BaseModel):
         return self
 
 
-class VoteConfig(BaseModel):
+class VoteConfig(StrictBaseModel):
     strategy: Literal["majority", "llm_judge"] = Field(
         default="majority",
         description=(
@@ -716,9 +870,26 @@ class VoteConfig(BaseModel):
             "branch outputs instead."
         ),
     )
+    debate_rounds: int = Field(
+        default=1,
+        ge=1,
+        le=5,
+        description=(
+            "Number of rounds each branch's own answer goes through before `strategy` "
+            "aggregates a final result — the multi-agent-debate pattern (Du et al., 2023). "
+            "1 (default) is today's original behavior: every branch answers once, independently, "
+            "with no visibility into the others. A value above 1 runs that many additional "
+            "rounds where each branch is shown every other branch's current answer and asked to "
+            "reconsider — its own isolated child engine/conversation continues across rounds, so "
+            "it can see its own prior reasoning too, not just restart fresh. Orthogonal to "
+            "`strategy`: debate changes how each branch's answer is produced before voting, not "
+            "how the final vote itself is tallied. Capped at 5 — cost scales as branches x "
+            "rounds, all full agent turns, so an unbounded value has no natural ceiling."
+        ),
+    )
 
 
-class WorkflowTask(BaseModel):
+class WorkflowTask(StrictBaseModel):
     name: str = Field(description="Task name, used for logging/tracing this step of the workflow.")
     type: Literal["sequential", "parallel", "vote"] = Field(
         default="sequential",
@@ -743,7 +914,7 @@ class WorkflowTask(BaseModel):
     )
 
 
-class RAGConfig(BaseModel):
+class RAGConfig(StrictBaseModel):
     docs_dir: str = Field(
         default="docs", description="Directory of documents to index for retrieval, relative to the project root."
     )
@@ -759,7 +930,7 @@ class RAGConfig(BaseModel):
     )
 
 
-class EpisodicMemoryConfig(BaseModel):
+class EpisodicMemoryConfig(StrictBaseModel):
     embedding_model: str = Field(
         default="text-embedding-3-small",
         description=(
@@ -784,9 +955,21 @@ class EpisodicMemoryConfig(BaseModel):
         gt=0,
         description="Default number of episodes recall_episodes returns when the caller doesn't pass an explicit limit.",
     )
+    retention_days: int | None = Field(
+        default=None,
+        description=(
+            "Age (in days) after which episodes rows are deleted. episodes is append-only (one "
+            "row per remember_episode call, never updated in place — see "
+            "runtime/episodic_memory.py) with no automatic pruning by default, so it grows "
+            "forever over a long production lifetime. None (default) keeps every episode "
+            "indefinitely. Enforced opportunistically (a small random chance on each "
+            "remember_episode write triggers a single indexed DELETE), same mechanism as "
+            "memory.run_log_retention_days."
+        ),
+    )
 
 
-class StateReducerConfig(BaseModel):
+class StateReducerConfig(StrictBaseModel):
     key: str = Field(description="Shared state key this reducer applies to.")
     strategy: Literal["overwrite", "append", "deep_merge"] = Field(
         default="overwrite",
@@ -797,7 +980,7 @@ class StateReducerConfig(BaseModel):
     )
 
 
-class ImportConfig(BaseModel):
+class ImportConfig(StrictBaseModel):
     path: str = Field(
         description="Path to another ai.yaml-shaped file to merge in (agents, tools, workflows, reducers)."
     )
@@ -807,7 +990,7 @@ class ImportConfig(BaseModel):
     )
 
 
-class CircuitBreakersConfig(BaseModel):
+class CircuitBreakersConfig(StrictBaseModel):
     max_handoffs_per_session: int | None = Field(
         default=25,
         description="Max allowed handoffs per session to prevent infinite loops",
@@ -871,9 +1054,23 @@ class CircuitBreakersConfig(BaseModel):
             "tokens; this bounds the input side)."
         ),
     )
+    max_tool_result_chars: int | None = Field(
+        default=20000,
+        ge=1,
+        description=(
+            "Max characters kept from a single tool call's result before it's appended to "
+            "conversation history — the rest is dropped with a truncation notice appended in "
+            "its place. Character-based rather than a real per-model tokenizer, to stay cheap "
+            "on this hot path (every tool call) — roughly 4 characters per token for English "
+            "text. Protects against one oversized result (a scraped page, a large API/MCP "
+            "response) silently consuming a large fraction of the context window in a single "
+            "turn, the same way max_corrector_tokens bounds a corrector call's output side. "
+            "None disables the cap entirely."
+        ),
+    )
 
 
-class RootRouterConfig(BaseModel):
+class RootRouterConfig(StrictBaseModel):
     description: str | None = Field(
         default=None, description="What this router decides"
     )
@@ -884,7 +1081,7 @@ class RootRouterConfig(BaseModel):
     )
 
 
-class AppConfig(BaseModel):
+class AppConfig(StrictBaseModel):
     version: str = Field(description="ai.yaml schema/format version.")
     name: str = Field(description="Project name.")
     description: str | None = Field(
@@ -930,6 +1127,13 @@ class AppConfig(BaseModel):
         default_factory=list,
         description="Tools declared at the root level, available to be referenced by name from any agent.",
     )  # Global tools
+    skills: list[SkillConfig] = Field(
+        default_factory=list,
+        description=(
+            "Agent Skills declared at the root level, available to be referenced by name from "
+            "any agent's `skills:` list — see SkillConfig."
+        ),
+    )
     agents: dict[str, AgentConfig] = Field(
         default_factory=dict, description="The agents that make up this app, keyed by name."
     )
@@ -963,6 +1167,20 @@ class AppConfig(BaseModel):
         description="`inta serve`/`inta monitor` configuration — auth, webhooks.",
     )
     default_agent: str = Field(description="Agent that receives the first message in a new session.")
+
+    @model_validator(mode="after")
+    def _validate_agent_skill_references_exist_at_root(self) -> "AppConfig":
+        known_skill_names = {s.name for s in self.skills}
+        for agent_name, agent_cfg in self.agents.items():
+            for skill_ref in agent_cfg.skills:
+                name = skill_ref if isinstance(skill_ref, str) else skill_ref.name
+                if name not in known_skill_names:
+                    raise ValueError(
+                        f"agents.{agent_name}.skills references skill {name!r}, which isn't "
+                        f"declared in the root-level skills: list. Declared skills: "
+                        f"{sorted(known_skill_names)}."
+                    )
+        return self
 
 
 def validate_config_dict(data: dict) -> tuple[AppConfig | None, list[str]]:
@@ -1006,6 +1224,15 @@ def validate_config_dict(data: dict) -> tuple[AppConfig | None, list[str]]:
                     if reason:
                         errors.append(
                             f"agents.{agent_name}.tools[{tool.name!r}].available_when "
+                            f"{available_when!r}: {reason}"
+                        )
+            for skill_ref in getattr(agent_cfg, "skills", []) or []:
+                available_when = getattr(skill_ref, "available_when", None)
+                if available_when:
+                    reason = validate_condition_syntax(available_when, known_functions)
+                    if reason:
+                        errors.append(
+                            f"agents.{agent_name}.skills[{skill_ref.name!r}].available_when "
                             f"{available_when!r}: {reason}"
                         )
             spawns_cfg = getattr(agent_cfg, "spawns", None)

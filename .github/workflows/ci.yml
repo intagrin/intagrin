@@ -29,6 +29,11 @@ jobs:
         pip install ruff pytest anyio
         pip install -e .
 
+    # tests/test_packaging.py builds a real wheel via `uv build` to verify package-data
+    # coverage, so uv must be on PATH here (matching the monitor-browser-tests job below).
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v3
+
     - name: Run Ruff Linter
       run: |
         ruff check .

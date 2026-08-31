@@ -140,12 +140,36 @@ def test_verifier_reports_self_healing_compression_and_parallel_tool_calls_as_bo
 
         # Default circuit_breakers values (FULL_COVERAGE_YAML overrides neither): 2 retries x
         # max_corrector_tokens=1000, max_compression_batch_messages=50, max_parallel_tool_calls_
-        # per_turn=10 — all three must render as their real bound, not "not capped".
+        # per_turn=10, max_tool_result_chars=20000 — all four must render as their real bound,
+        # not "not capped".
         assert "not capped" not in output
         assert "…" not in output  # a truncated (not just wrapped) identifier would show as this
         assert "2,000" in output
         assert "50 msgs/batch" in output
         assert "10 concurrent" in output
+        assert "20,000 chars" in output
+        assert "[red]no[/red]" not in output
+
+
+def test_verifier_flags_an_unbounded_tool_result_cap():
+    """max_tool_result_chars is the one nullable breaker in the cost table — setting it to null
+    must render as explicitly unbounded (red 'no'), not silently rendered as a bound like the
+    other four always-numeric breakers."""
+    ai_yaml = FULL_COVERAGE_YAML.replace(
+        "circuit_breakers:\n", "circuit_breakers:\n  max_tool_result_chars: null\n", 1
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(ai_yaml)
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "unbounded" in output
+        assert "max_tool_result_chars: null" in output
 
 
 def test_verifier_flags_a_router_condition_using_unsupported_syntax():
@@ -740,6 +764,69 @@ agents:
 
         assert "requires_approval tool(s) with memory.type: buffer" in output
         assert "billing.issue_refund" in output
+
+
+def test_verifier_flags_a_dangling_skill_path():
+    """A skill whose path doesn't exist on disk would otherwise only surface as an error string
+    the first time load_skill is actually called at runtime — inta verify must catch it statically."""
+    ai_yaml = """version: "1.0"
+name: "dangling-skill-app"
+default_agent: "support"
+model:
+  primary: "gemini/gemini-2.5-flash"
+memory:
+  type: "sqlite"
+skills:
+  - name: "refund_policy"
+    description: "How to handle refunds"
+    path: "skills/does_not_exist.md"
+agents:
+  support:
+    skills: ["refund_policy"]
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(ai_yaml)
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "Agent Skill path(s) do not exist" in output
+        assert "refund_policy" in output
+        assert "skills/does_not_exist.md" in output
+
+
+def test_verifier_reports_skill_paths_as_valid_when_they_exist():
+    ai_yaml = """version: "1.0"
+name: "valid-skill-app"
+default_agent: "support"
+model:
+  primary: "gemini/gemini-2.5-flash"
+memory:
+  type: "sqlite"
+skills:
+  - name: "refund_policy"
+    description: "How to handle refunds"
+    path: "skills/refund_policy.md"
+agents:
+  support:
+    skills: ["refund_policy"]
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(ai_yaml)
+        (p_dir / "skills").mkdir()
+        (p_dir / "skills" / "refund_policy.md").write_text("Always refund within 30 days.")
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "Agent Skill path(s) do not exist" not in output
+        assert "All Agent Skill paths resolve" in output
 
 
 def test_verifier_does_not_advise_when_approval_tool_has_persistent_memory():
