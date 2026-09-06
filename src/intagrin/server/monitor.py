@@ -1006,9 +1006,16 @@ def get_memory(user_context: str = Depends(verify_monitor_auth)):
 
 
 @app.get("/api/logs")
-def get_logs(user_context: str = Depends(verify_monitor_auth)):
+def get_logs(since_id: int | None = None, user_context: str = Depends(verify_monitor_auth)):
     """Lists recent API-triggered run logs (see runtime/run_logger.py) for the authenticated
-    tenant, most recent first — powers the Monitor dashboard's Logs page."""
+    tenant, most recent first — powers the Monitor dashboard's Logs page.
+
+    since_id (optional) restricts results to rows with id > since_id, so a caller polling
+    incrementally (e.g. a fleet console aggregating several deployed projects) can avoid
+    re-fetching the same 200-row window on every poll — pass the highest id you've already seen.
+    Still capped at 200 and still most-recent-first: a caller that falls more than 200 new rows
+    behind between polls will miss the overflow, same best-effort tradeoff GET /sessions already
+    has via its own fixed LIMIT."""
     project_dir = Path.cwd()
     try:
         graph = parse_project(project_dir)
@@ -1027,10 +1034,13 @@ def get_logs(user_context: str = Depends(verify_monitor_auth)):
             conn = sqlite3.connect(str(db_path), timeout=15.0)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM run_logs WHERE session_id LIKE ? ORDER BY created_at DESC LIMIT 200",
-                (f"{user_context}:%",),
-            )
+            query = "SELECT * FROM run_logs WHERE session_id LIKE ?"
+            params = [f"{user_context}:%"]
+            if since_id is not None:
+                query += " AND id > ?"
+                params.append(since_id)
+            query += " ORDER BY created_at DESC LIMIT 200"
+            cursor.execute(query, tuple(params))
             for row in cursor.fetchall():
                 d = dict(row)
                 d["session_id"] = (d.get("session_id") or "").replace(
@@ -1051,11 +1061,13 @@ def get_logs(user_context: str = Depends(verify_monitor_auth)):
 
             try:
                 with pooled_postgres_connection(conn_url) as conn, postgres_dict_cursor(conn) as cursor:
-                    cursor.execute(
-                        "SELECT * FROM run_logs WHERE session_id LIKE %s "
-                        "ORDER BY created_at DESC LIMIT 200",
-                        (f"{user_context}:%",),
-                    )
+                    query = "SELECT * FROM run_logs WHERE session_id LIKE %s"
+                    params = [f"{user_context}:%"]
+                    if since_id is not None:
+                        query += " AND id > %s"
+                        params.append(since_id)
+                    query += " ORDER BY created_at DESC LIMIT 200"
+                    cursor.execute(query, tuple(params))
                     for row in cursor.fetchall():
                         d = dict(row)
                         d["session_id"] = (d.get("session_id") or "").replace(

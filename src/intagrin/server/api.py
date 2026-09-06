@@ -1049,6 +1049,92 @@ def get_sessions(user_context: str = Depends(verify_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/pending-approvals")
+def get_pending_approvals(user_context: str = Depends(verify_auth)):
+    """Lists every session for the authenticated tenant currently paused on a human-in-the-loop
+    approval — a narrow, poll-friendly shape (no message history, unlike GET /sessions) built for
+    a caller that needs to answer "what across my whole fleet of deployed projects is waiting on
+    me right now" without pulling every session's full transcript. Reports both the actively
+    claimed _pending_approval slot and how many more are queued behind it (see
+    RuntimeEngine._set_pending_approval), so a session with several concurrent pauses doesn't
+    read as having only one.
+
+    Same best-effort LIMIT-window tradeoff as GET /sessions: a session paused long enough ago to
+    fall out of the most-recently-updated window won't appear here."""
+    project_dir = Path.cwd()
+    try:
+        graph = parse_project(project_dir)
+        mem_cfg = graph.config.memory
+        pending: list[dict[str, Any]] = []
+
+        def _collect(raw_session_id: str, raw_state: Any) -> None:
+            try:
+                state = (
+                    raw_state
+                    if isinstance(raw_state, dict)
+                    else json.loads(raw_state) if raw_state else {}
+                )
+            except Exception:
+                return
+            primary = state.get("_pending_approval")
+            queued = state.get("_pending_approval_queue") or []
+            if not primary and not queued:
+                return
+            pending.append(
+                {
+                    "session_id": raw_session_id.replace(f"{user_context}:", "", 1),
+                    "pending": primary,
+                    "queued_count": len(queued),
+                }
+            )
+
+        if mem_cfg.type == "sqlite":
+            import sqlite3
+
+            db_path = project_dir / (mem_cfg.db_path or ".ai/memory.db")
+            if not db_path.exists():
+                return []
+
+            with sqlite3.connect(str(db_path), timeout=15.0) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT session_id, state FROM checkpoints WHERE session_id LIKE ? "
+                    "ORDER BY updated_at DESC LIMIT 200",
+                    (f"{user_context}:%",),
+                )
+                for row in cursor.fetchall():
+                    _collect(row["session_id"], row["state"])
+
+        elif mem_cfg.type == "postgres":
+            conn_url = mem_cfg.connection_url
+            if not conn_url and mem_cfg.env_var:
+                conn_url = os.environ.get(mem_cfg.env_var)
+            if not conn_url:
+                conn_url = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
+            if not conn_url:
+                return []
+
+            try:
+                from ..runtime.memory import pooled_postgres_connection, postgres_dict_cursor
+
+                with pooled_postgres_connection(conn_url) as conn, postgres_dict_cursor(conn) as cursor:
+                    cursor.execute(
+                        "SELECT session_id, state FROM checkpoints WHERE session_id LIKE %s "
+                        "ORDER BY updated_at DESC LIMIT 200",
+                        (f"{user_context}:%",),
+                    )
+                    for row in cursor.fetchall():
+                        _collect(row["session_id"], row["state"])
+            except (ImportError, IntaGrinError):
+                return []
+
+        return pending
+    except Exception as e:
+        Tracer.log_error(f"Pending Approvals Listing Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class ApproverCreateRequest(BaseModel):
     approver_id: str
 

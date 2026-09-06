@@ -783,7 +783,7 @@ class RuntimeEngine:
             # tracing/otel_exporter.py for why these are deliberately not merged into one span tree.
             from ..tracing.otel_exporter import ensure_started as _ensure_otel_exporter_started
 
-            _ensure_otel_exporter_started(telemetry_options)
+            _ensure_otel_exporter_started(telemetry_options, service_name=self.graph.config.name)
 
         if self._shared_resources is not None:
             # Reuse pooled MCP connections/RAG index/tool schemas/prompts instead of rebuilding

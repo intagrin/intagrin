@@ -47,8 +47,8 @@ _started = False
 _tracer_provider: TracerProvider | None = None
 
 
-def _build_tracer_provider() -> TracerProvider:
-    provider = TracerProvider(resource=Resource.create({"service.name": "intagrin"}))
+def _build_tracer_provider(service_name: str = "intagrin") -> TracerProvider:
+    provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     if endpoint:
         try:
@@ -197,18 +197,26 @@ async def _consume_events(tracer: OtelTracer) -> None:
         EventStreamer.unsubscribe(queue)
 
 
-def ensure_started(telemetry_options: list[str]) -> None:
+def ensure_started(telemetry_options: list[str], service_name: str = "intagrin") -> None:
     """Idempotently starts the background EventStreamer-to-OTel-span consumer the first time a
     project with `telemetry: ["otel"]` initializes an engine in this process. Safe to call from
     every `RuntimeEngine.initialize()` (every session, every request) — a second call is a no-op,
     matching the idempotency style of `runtime/shared_resources.py`'s `SharedResourcesCache`.
     Raises `IntaGrinError("IG-RT-009", ...)` synchronously (before starting the consumer) if an
     OTLP endpoint was requested but its exporter package isn't installed, so misconfiguration
-    surfaces immediately at startup rather than silently inside a background task."""
+    surfaces immediately at startup rather than silently inside a background task.
+
+    service_name (the OTel resource's `service.name`, defaults to the literal "intagrin") should
+    be set to the project's own `ai.yaml` name by callers — otherwise every IntaGrin deployment
+    sharing one OTLP backend (e.g. a fleet console aggregating several projects) reports under the
+    identical service name and can't be told apart. Like the module-global `_started` gate itself,
+    this is process-global and first-caller-wins: the same pre-existing limitation
+    `model.enable_prompt_caching`'s telemetry callbacks already have across concurrently loaded
+    projects in one process."""
     global _started, _tracer_provider
     if _started or "otel" not in telemetry_options:
         return
-    _tracer_provider = _build_tracer_provider()
+    _tracer_provider = _build_tracer_provider(service_name)
     tracer = _tracer_provider.get_tracer("intagrin")
     asyncio.create_task(_consume_events(tracer))
     _started = True

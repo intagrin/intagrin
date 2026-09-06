@@ -189,6 +189,32 @@ def test_ensure_started_is_idempotent():
     assert asyncio.run(_run()) is True
 
 
+def test_build_tracer_provider_defaults_service_name_to_intagrin():
+    provider = otel_exporter._build_tracer_provider()
+    assert provider.resource.attributes["service.name"] == "intagrin"
+
+
+def test_build_tracer_provider_uses_the_given_service_name():
+    """Two projects sharing one OTLP backend must be distinguishable by service.name — passing
+    the project's own ai.yaml name is what a fleet console needs to tell them apart."""
+    provider = otel_exporter._build_tracer_provider(service_name="travel-planner")
+    assert provider.resource.attributes["service.name"] == "travel-planner"
+
+
+def test_ensure_started_threads_service_name_into_the_tracer_provider():
+    async def _run():
+        otel_exporter.ensure_started(["otel"], service_name="social-media-manager")
+        await asyncio.sleep(0)
+
+    import asyncio
+
+    asyncio.run(_run())
+    assert (
+        otel_exporter._tracer_provider.resource.attributes["service.name"]
+        == "social-media-manager"
+    )
+
+
 def test_ensure_started_noop_when_telemetry_does_not_include_otel():
     otel_exporter.ensure_started(["langfuse"])
     assert otel_exporter._started is False
