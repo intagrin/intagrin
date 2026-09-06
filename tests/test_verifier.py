@@ -855,3 +855,78 @@ agents:
         output = capture.get()
 
         assert "requires_approval tool(s) with memory.type" not in output
+
+
+def _six_tools_yaml(extra_agent_yaml: str = "") -> str:
+    tools = "\n".join(
+        f'      - name: "tool_{i}"\n        module: "verifier_lazy_load_nudge_test_module"'
+        for i in range(6)
+    )
+    return f"""version: "1.0"
+name: "lazy-load-nudge-app"
+default_agent: "worker"
+model:
+  primary: "gemini/gemini-2.5-flash"
+memory:
+  type: "sqlite"
+agents:
+  worker:
+{extra_agent_yaml}
+    tools:
+{tools}
+"""
+
+
+def test_verifier_advises_when_agent_has_many_tools_and_no_lazy_load():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(_six_tools_yaml())
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "lazy_load_tools not set" in output
+        assert "worker" in output.split("lazy_load_tools not set")[1]
+
+
+def test_verifier_does_not_advise_when_lazy_load_tools_is_set():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(_six_tools_yaml("    lazy_load_tools: true\n"))
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "lazy_load_tools not set" not in output
+
+
+def test_verifier_does_not_advise_below_the_five_tool_threshold():
+    """ToolRunner.get_active_tools is a no-op at 5 tools or fewer even with lazy_load_tools set —
+    the nudge must match that exact threshold, not flag agents it wouldn't actually help."""
+    ai_yaml = """version: "1.0"
+name: "few-tools-app"
+default_agent: "worker"
+model:
+  primary: "gemini/gemini-2.5-flash"
+memory:
+  type: "sqlite"
+agents:
+  worker:
+    tools:
+      - name: "tool_1"
+        module: "verifier_lazy_load_nudge_test_module"
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(ai_yaml)
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "lazy_load_tools not set" not in output

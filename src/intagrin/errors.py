@@ -270,6 +270,16 @@ _SPECS: list[ErrorSpec] = [
         ),
     ),
     ErrorSpec(
+        code="IG-RT-010",
+        category="Runtime",
+        title="E2B package not installed",
+        causes=(
+            "A `type: sandbox` tool sets `backend: e2b` but the `e2b` package isn't installed. "
+            'Run `pip install "intagrin[e2b]"`, or set `backend: local` to use the stdlib-only '
+            "subprocess executor instead."
+        ),
+    ),
+    ErrorSpec(
         code="IG-A2A-001",
         category="A2A Integration",
         title="Malformed A2A JSON-RPC request",

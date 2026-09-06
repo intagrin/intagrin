@@ -2788,6 +2788,15 @@ def copilot_command(
             else:
                 write_text(a_dir / agent_fname, agent_instructions)
 
+            # AGENTS.md: the tool-agnostic instruction file now read by Codex, Cursor, Aider,
+            # Copilot, Gemini CLI, and Windsurf alike (governed alongside MCP by the Linux
+            # Foundation's Agentic AI Foundation) — written once at the project root regardless of
+            # which IDE-specific agent was chosen above, so a project set up for one AI coding
+            # tool is still legible to whatever tool a consumer's teammate happens to use.
+            # agent_instructions is already IDE-frontmatter-free (only the per-agent branches
+            # above prepend frontmatter to a_dir's own file), so it's reused verbatim here.
+            write_text(project_dir / "AGENTS.md", agent_instructions + cross_ref_text)
+
             # Skill is common for all
             write_text(s_dir / skill_fname, skill_content)
             write_text(r_dir / "architecture.md", _load_copilot_template("reference_architecture.md"))
@@ -2820,6 +2829,7 @@ def copilot_command(
             write_text(compile_skill_dir / compile_skill_fname, compile_skill_content)
 
             console.print(f"[green]✓ Created Agent in: {a_dir}/{agent_fname}[/green]")
+            console.print(f"[green]✓ Created AGENTS.md in: {project_dir}/AGENTS.md[/green]")
             console.print(f"[green]✓ Created Skill in: {s_dir}/{skill_fname}[/green]")
             console.print(
                 f"[green]✓ Created Sync Skill in: {compile_skill_dir}/{compile_skill_fname}[/green]"

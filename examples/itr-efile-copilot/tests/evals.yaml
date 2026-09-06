@@ -1,0 +1,20 @@
+evaluations:
+  - name: "intake_validates_pan"
+    agent: "intake_agent"
+    input: "My PAN is ABCDE1234F, name Ravi Kumar, DOB 1990-05-14, filing for AY 2026-27."
+    expected_tool: "validate_pan"
+
+  - name: "income_computes_hra_exemption"
+    agent: "income_agent"
+    input: "My basic+DA is 600000, HRA received is 240000, rent paid is 300000, I live in Mumbai."
+    expected_tool: "compute_hra_exemption"
+
+  - name: "deductions_checks_80c_limit"
+    agent: "deductions_agent"
+    input: "I want to claim 80C deduction of 200000 for my PPF and ELSS investments."
+    expected_tool: "check_deduction_limit"
+
+  - name: "tax_computation_never_guesses"
+    agent: "tax_computation_agent"
+    input: "I want to compare old vs new regime for my income."
+    expected_tool: "compare_tax_regimes"

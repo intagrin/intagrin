@@ -58,4 +58,19 @@ agents:
 
 The LLM calls it with a single `code` argument. Each call runs in a fresh, isolated subprocess with a wall-clock timeout, POSIX CPU/memory limits, and an explicit minimal environment (never a copy of your process's own `os.environ` — a real API key sitting in your engine's environment won't leak into whatever the code prints or reads).
 
-**Be clear about what this is and isn't.** It's process and resource isolation for a buggy or runaway script — it is *not* a filesystem or network sandbox: the subprocess runs as the same OS user as your engine and can read/write anything that user can, and there's no firewall blocking outbound network calls. For genuinely untrusted code, pair this with `requires_approval: true` (`inta verify` will nudge you if you forget) or swap in a real container/microVM-based executor. Its output is treated as `untrusted_output` by default (see [08_Security_and_Reliability.md](./08_Security_and_Reliability.md)), since what the code prints can be influenced by whatever it read or did.
+**Be clear about what this is and isn't.** It's process and resource isolation for a buggy or runaway script — it is *not* a filesystem or network sandbox: the subprocess runs as the same OS user as your engine and can read/write anything that user can, and there's no firewall blocking outbound network calls. For genuinely untrusted code, pair this with `requires_approval: true` (`inta verify` will nudge you if you forget) or set `backend: "e2b"` (below) for real isolation. Its output is treated as `untrusted_output` by default (see [08_Security_and_Reliability.md](./08_Security_and_Reliability.md)), since what the code prints can be influenced by whatever it read or did.
+
+### Real isolation via E2B (`backend: "e2b"`)
+For code you don't fully trust, run it in an [E2B](https://e2b.dev) Firecracker microVM instead of a local subprocess — genuine filesystem and network isolation from your engine process, not just resource limits:
+
+```yaml
+      - name: "run_python"
+        type: "sandbox"
+        backend: "e2b"
+        language: "python"
+        timeout_seconds: 10
+        e2b_template: null        # optional — defaults to E2B's own base template
+        requires_approval: true
+```
+
+Requires the optional `e2b` extra (`pip install "intagrin[e2b]"`) and an `E2B_API_KEY` environment variable (read directly by the `e2b` SDK, the same way any other provider API key is picked up from the environment — no separate `ai.yaml` field for it). `inta verify` checks for both and nudges if either is missing. `max_memory_mb` has no effect on this backend — E2B fixes CPU/RAM per sandbox template at build time, not per call. Costs a network round-trip and E2B's own per-second billing while a sandbox is alive; each call always kills its sandbox afterward, success or failure.

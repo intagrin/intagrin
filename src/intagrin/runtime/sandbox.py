@@ -26,9 +26,21 @@ WHAT THIS DOES NOT PROVIDE (be honest about this, don't let a project think othe
     network calls like any other process this user runs.
   - Protection against a truly adversarial payload. This reduces blast radius for a buggy or
     runaway script (the common case for LLM-generated code), not a security boundary for content
-    you'd call hostile. For that, run this behind requires_approval and/or swap in a real
-    container/microVM-based executor — this module is intentionally a single, easily-replaced
-    function so that swap doesn't ripple through the rest of the codebase.
+    you'd call hostile. For that, run this behind requires_approval and/or use `backend: e2b`
+    below instead — this module was kept as a single, easily-replaced function specifically so
+    that swap wouldn't ripple through the rest of the codebase, and `run_sandboxed_code_e2b` is
+    exactly that swap.
+
+`run_sandboxed_code_e2b` (SandboxToolConfig.backend: "e2b") runs the same submitted code inside a
+fresh E2B (https://e2b.dev) Firecracker microVM instead of a local subprocess — real filesystem
+and network isolation from this process, not just the resource/environment isolation above.
+Requires the optional `e2b` package (`pip install "intagrin[e2b]"`) and an E2B_API_KEY
+environment variable, read directly by the e2b SDK itself (no ai.yaml field for it, same as any
+other provider API key litellm already reads from the environment). Costs a network round-trip
+per call and E2B's own per-second billing while the sandbox is alive; the sandbox is always
+killed in a `finally` block regardless of outcome so a call never leaks a billable instance.
+CPU/RAM are fixed by the E2B template at build time, not configurable per call — max_memory_mb
+has no effect on this backend.
 """
 
 import asyncio
@@ -37,6 +49,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from ..errors import IntaGrinError
 
 _LANGUAGE_COMMAND = {
     "python": lambda script_path: [sys.executable, str(script_path)],
@@ -115,3 +129,65 @@ async def run_sandboxed_code(
     isolated) and returns exit code + captured stdout/stderr as one string. Off the event loop via
     asyncio.to_thread — subprocess.run itself blocks."""
     return await asyncio.to_thread(_run_sync, code, language, timeout_seconds, max_memory_mb)
+
+
+async def run_sandboxed_code_e2b(
+    code: str, language: str, timeout_seconds: int, template: str | None
+) -> str:
+    """E2B-backed counterpart to run_sandboxed_code (see module docstring) — same call shape and
+    same "always return a descriptive string, never raise" contract as the local backend, so a
+    project can flip SandboxToolConfig.backend without its tool's behavior changing shape. A
+    non-zero exit is reported the same way the local backend reports it (as ordinary output, not
+    an error) even though the e2b SDK's own commands.run raises CommandExitException on that case
+    internally — caught here and unwrapped back into the same "Exit code: N" text.
+    """
+    try:
+        from e2b import (
+            AsyncSandbox,
+            AuthenticationException,
+            CommandExitException,
+            SandboxException,
+            TimeoutException,
+        )
+    except ImportError:
+        raise IntaGrinError(
+            "IG-RT-010",
+            'Sandbox backend "e2b" requires the e2b package. Run: pip install "intagrin[e2b]"',
+        )
+
+    script_name = "script.py" if language == "python" else "script.sh"
+    script_path = f"/tmp/{script_name}"
+    run_cmd = f"python3 {script_path}" if language == "python" else f"bash {script_path}"
+
+    try:
+        sandbox = await AsyncSandbox.create(template=template, timeout=timeout_seconds + 10)
+    except AuthenticationException:
+        return "E2B sandbox error: authentication failed — check the E2B_API_KEY environment variable."
+    except SandboxException as e:
+        return f"E2B sandbox error: failed to create sandbox — {e}"
+
+    try:
+        await sandbox.files.write(script_path, code)
+        try:
+            result = await sandbox.commands.run(run_cmd, timeout=timeout_seconds)
+            exit_code, stdout, stderr = result.exit_code, result.stdout, result.stderr
+        except CommandExitException as e:
+            # A non-zero exit is expected, routine output here, not a failure of the sandbox
+            # call itself — the local backend reports it the same informational way.
+            exit_code, stdout, stderr = e.exit_code, e.stdout, e.stderr
+        except TimeoutException:
+            return f"Sandbox timed out after {timeout_seconds}s — the process was killed."
+
+        parts = [f"Exit code: {exit_code}"]
+        if stdout:
+            parts.append(f"stdout:\n{_truncate(stdout)}")
+        if stderr:
+            parts.append(f"stderr:\n{_truncate(stderr)}")
+        return "\n".join(parts)
+    except SandboxException as e:
+        return f"E2B sandbox error: {e}"
+    finally:
+        try:
+            await sandbox.kill()
+        except Exception:
+            pass

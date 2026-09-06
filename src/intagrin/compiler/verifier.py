@@ -1,3 +1,5 @@
+import importlib.util
+import os
 from pathlib import Path
 
 from rich.console import Console
@@ -270,6 +272,33 @@ class GraphVerifier:
             for agent_name, tool_name in ungated_sandboxes:
                 console.print(f"   ↳ [dim]{agent_name}.{tool_name}[/dim]")
 
+        # --- E2B sandbox backend: catch the two most common misconfigurations before a real
+        # session hits them at runtime — the extra not installed (IG-RT-010 at call time
+        # instead), or E2B_API_KEY simply not set (an opaque auth failure string from the e2b SDK
+        # instead). Advisory only: this machine not having the key set doesn't mean the deployed
+        # environment won't. ---
+        e2b_sandboxes = []
+        for agent_name, agent_cfg in cfg.agents.items():
+            for tool in getattr(agent_cfg, "tools", []) or []:
+                resolved = _resolve(tool)
+                if isinstance(resolved, SandboxToolConfig) and resolved.backend == "e2b":
+                    e2b_sandboxes.append((agent_name, tool.name))
+        if e2b_sandboxes and importlib.util.find_spec("e2b") is None:
+            console.print(
+                "\n[yellow]⚠ Sandbox tool(s) set backend: e2b but the 'e2b' package isn't "
+                'installed here — this will fail with IG-RT-010 at call time. Run: pip install '
+                '"intagrin[e2b]"[/yellow]'
+            )
+            for agent_name, tool_name in e2b_sandboxes:
+                console.print(f"   ↳ [dim]{agent_name}.{tool_name}[/dim]")
+        elif e2b_sandboxes and not os.environ.get("E2B_API_KEY"):
+            console.print(
+                "\n[dim]ℹ Sandbox tool(s) set backend: e2b but E2B_API_KEY isn't set in this "
+                "environment — set it wherever this project actually runs, if not here.[/dim]"
+            )
+            for agent_name, tool_name in e2b_sandboxes:
+                console.print(f"   ↳ [dim]{agent_name}.{tool_name}[/dim]")
+
         # --- MCP Tasks extension: a claimed (long-running) call with no max_task_wait_seconds
         # is unbounded from check_mcp_task_status's point of view — it will keep reporting
         # "still running" forever rather than eventually failing. Advisory only: plenty of
@@ -292,6 +321,27 @@ class GraphVerifier:
             )
             for name in mcp_tools_without_wait_cap:
                 console.print(f"   ↳ [dim]{name}[/dim]")
+
+        # --- lazy_load_tools: ToolRunner.get_active_tools only ever filters an agent's tool
+        # schemas when lazy_load_tools is set AND it has more than 5 tools (tool_runner.py) — below
+        # that it's a no-op. An agent past that threshold with the flag unset pays full schema
+        # tokens on every single turn with no nudge to turn on the (free, additive) embedding-gate
+        # fast path. Advisory only: some agents genuinely need every tool visible every turn. ---
+        agents_needing_lazy_load = [
+            agent_name
+            for agent_name, agent_cfg in cfg.agents.items()
+            if len(getattr(agent_cfg, "tools", []) or []) > 5
+            and not getattr(agent_cfg, "lazy_load_tools", False)
+        ]
+        if agents_needing_lazy_load:
+            console.print(
+                "\n[dim]ℹ Agent(s) with more than 5 tools and lazy_load_tools not set — every "
+                "tool schema is sent on every turn. Consider lazy_load_tools: true to select a "
+                "relevant subset per turn (embedding-based, no extra LLM call in the common "
+                "case):[/dim]"
+            )
+            for agent_name in agents_needing_lazy_load:
+                console.print(f"   ↳ [dim]{agent_name}[/dim]")
 
         # --- requires_approval needs a persistent memory backend: a pause is held in
         # state["_pending_approval"], only resumed via a *separate* /resume request, and only

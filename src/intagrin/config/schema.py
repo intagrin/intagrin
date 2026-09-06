@@ -313,6 +313,23 @@ class MemoryConfig(StrictBaseModel):
             "only, same scope as run_logs itself."
         ),
     )
+    context_edit_keep_recent_messages: int | None = Field(
+        default=None,
+        ge=2,
+        description=(
+            "Rule-based, zero-LLM-cost complement to compression: on every turn, any 'tool' role "
+            "message older than the most recent N messages has its content body cleared in place "
+            "to a short placeholder — the placeholder still names the original tool call, and the "
+            "preceding assistant tool_calls message and this tool message are both kept (never "
+            "removed), so a call/response pair is never split the way _compress_memory's own "
+            "eviction has to guard against. This runs continuously, well before "
+            "memory.max_messages is ever reached, so a long tool-heavy run carries less token "
+            "bulk the whole time instead of paying for one expensive LLM summarization pass only "
+            "once the window is already full. Mirrors Anthropic's server-side context-editing "
+            "beta, but provider-agnostic and purely rule-based (age), not a hosted feature only "
+            "some providers support. None (default) disables this, preserving today's behavior."
+        ),
+    )
 
 
 class ConditionFunctionConfig(StrictBaseModel):
@@ -510,14 +527,39 @@ class OpenAPIToolConfig(StrictBaseModel):
 
 
 class SandboxToolConfig(StrictBaseModel):
-    """Runs agent-generated code in an isolated subprocess (see runtime/sandbox.py for exactly
-    what is and isn't isolated — process/resource/environment isolation, NOT a filesystem or
-    network security boundary). The missing piece between the coding-agent template's coder/
-    verifier loop (which writes and reviews code) and actually running code an LLM produced."""
+    """Runs agent-generated code in an isolated environment — either `backend: local`
+    (runtime/sandbox.py's stdlib-only subprocess: process/resource/environment isolation, NOT a
+    filesystem or network security boundary) or `backend: e2b` (a real Firecracker microVM via
+    https://e2b.dev — genuine filesystem/network isolation, at the cost of a network round-trip,
+    the optional `e2b` extra, and E2B's own per-second billing). The missing piece between the
+    coding-agent template's coder/verifier loop (which writes and reviews code) and actually
+    running code an LLM produced."""
 
     name: str = Field(description="Tool name exposed to the LLM for tool-calling.")
     type: Literal["sandbox"] = Field(
         description="Discriminator — must be the literal string 'sandbox'."
+    )
+    backend: Literal["local", "e2b"] = Field(
+        default="local",
+        description=(
+            "Execution backend. 'local' (default) — see runtime/sandbox.py's module docstring "
+            "for exactly what is and isn't isolated; not a security boundary for hostile code. "
+            "'e2b' runs the code in a fresh E2B Firecracker microVM (runtime/sandbox.py's "
+            "run_sandboxed_code_e2b) instead — real filesystem and network isolation from this "
+            "process. Requires the `e2b` package (`pip install \"intagrin[e2b]\"`; raises "
+            "IG-RT-010 if missing) and an E2B_API_KEY environment variable (read directly by the "
+            "e2b SDK — no ai.yaml field for it, matching how litellm's own provider API keys are "
+            "handled). max_memory_mb has no effect on this backend — E2B fixes CPU/RAM per "
+            "sandbox template at build time, not per run."
+        ),
+    )
+    e2b_template: str | None = Field(
+        default=None,
+        description=(
+            "E2B sandbox template id/name to launch (see https://e2b.dev/docs/sandbox-template) "
+            "when backend is 'e2b'. None (default) uses E2B's own default base template. Ignored "
+            "for the 'local' backend."
+        ),
     )
     language: Literal["python", "bash"] = Field(
         default="python", description="Interpreter used to run the submitted code."
@@ -527,9 +569,10 @@ class SandboxToolConfig(StrictBaseModel):
         ge=1,
         le=300,
         description=(
-            "Wall-clock limit before the sandboxed process is killed. Also used as the POSIX "
-            "CPU-time rlimit (see runtime/sandbox.py) — a no-op on platforms without the "
-            "`resource` module (Windows)."
+            "Wall-clock limit before the sandboxed process is killed. For backend 'local', also "
+            "used as the POSIX CPU-time rlimit (see runtime/sandbox.py) — a no-op on platforms "
+            "without the `resource` module (Windows). For backend 'e2b', passed as both the "
+            "command's own timeout and (plus a small buffer) the sandbox's lifetime timeout."
         ),
     )
     max_memory_mb: int | None = Field(
@@ -537,8 +580,9 @@ class SandboxToolConfig(StrictBaseModel):
         ge=1,
         description=(
             "POSIX address-space rlimit (RLIMIT_AS) applied to the sandboxed process, in "
-            "megabytes. None disables the memory limit entirely. A no-op on platforms without "
-            "the `resource` module (Windows)."
+            "megabytes. None disables the memory limit entirely. Only applies to backend "
+            "'local' (a no-op on platforms without the `resource` module, e.g. Windows) — "
+            "ignored entirely for backend 'e2b', see `backend`'s own description."
         ),
     )
     requires_approval: bool = Field(
