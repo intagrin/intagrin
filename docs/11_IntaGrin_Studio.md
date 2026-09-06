@@ -1,3 +1,7 @@
+---
+description: IntaGrin Studio is a visual, bidirectional node editor for designing and editing multi-agent swarms, with no external services required.
+---
+
 # Bidirectional Visual Orchestration (IntaGrin Studio)
 
 Writing YAML is fast, but visualizing complex multi-agent swarms is hard. IntaGrin includes a

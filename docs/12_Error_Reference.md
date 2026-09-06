@@ -1,3 +1,7 @@
+---
+description: The complete reference of IntaGrin's structured error codes, generated directly from the framework's error registry.
+---
+
 # Error Code Reference
 
 Every codified IntaGrin error is listed below, grouped by category. Errors not yet migrated to a code keep today's plain-text messages — this list grows incrementally, it is not exhaustive.

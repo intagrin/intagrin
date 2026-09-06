@@ -1,13 +1,57 @@
 import { defineConfig } from 'vitepress'
 
+const SITE_URL = "https://docs.intagrin.com"
+const SITE_TITLE = "IntaGrin"
+const SITE_DESCRIPTION = "A declarative framework for building multi-agent LLM systems in YAML"
+const SOCIAL_IMAGE = `${SITE_URL}/assets/definai_hero_banner.png`
+
 export default defineConfig({
-  title: "IntaGrin",
-  description: "A declarative framework for building multi-agent LLM systems in YAML",
+  title: SITE_TITLE,
+  description: SITE_DESCRIPTION,
   base: "/",
   cleanUrls: true,
+  sitemap: {
+    hostname: SITE_URL
+  },
   head: [
-    ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }]
+    ['link', { rel: 'icon', type: 'image/png', href: '/favicon.png' }],
+    ['meta', { name: 'robots', content: 'index, follow' }],
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:site_name', content: SITE_TITLE }],
+    ['meta', { property: 'og:image', content: SOCIAL_IMAGE }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:image', content: SOCIAL_IMAGE }],
+    ['script', { type: 'application/ld+json' }, JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "IntaGrin",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Cross-platform",
+      "description": SITE_DESCRIPTION,
+      "url": SITE_URL,
+      "license": "https://www.apache.org/licenses/LICENSE-2.0",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "codeRepository": "https://github.com/intagrin/intagrin"
+    })]
   ],
+  // Per-page canonical URL + Open Graph tags derived from each page's own
+  // frontmatter description/title, since the static `head` array above only
+  // covers site-wide defaults.
+  transformHead: ({ pageData }) => {
+    const path = pageData.relativePath
+      .replace(/index\.md$/, '')
+      .replace(/\.md$/, '')
+    const url = `${SITE_URL}/${path}`
+    const title = pageData.frontmatter?.title || pageData.title
+    const ogTitle = title ? `${title} | ${SITE_TITLE}` : SITE_TITLE
+    const description = pageData.description || SITE_DESCRIPTION
+    return [
+      ['link', { rel: 'canonical', href: url }],
+      ['meta', { property: 'og:url', content: url }],
+      ['meta', { property: 'og:title', content: ogTitle }],
+      ['meta', { property: 'og:description', content: description }]
+    ]
+  },
   themeConfig: {
     logo: "/assets/nav-logo.png",
     siteTitle: "IntaGrin",

@@ -1,3 +1,7 @@
+---
+description: How IntaGrin's human-in-the-loop workflow pauses on flagged tools, notifies via webhook, and resumes once a human approves or edits the call.
+---
+
 # Human-In-The-Loop (HITL)
 
 Enterprise applications cannot blindly trust AI to execute dangerous tools (like `refund_customer` or `drop_database`). IntaGrin provides a decoupled Human-in-the-Loop workflow: pause on a flagged tool, notify via webhook, resume via API once a human has reviewed (and optionally edited) the call.

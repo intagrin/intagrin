@@ -1,3 +1,7 @@
+---
+description: The concrete cost, loop, and content-risk guardrails IntaGrin provides — circuit breakers, approval gates, and provenance checks.
+---
+
 # Security & Guardrails
 
 IntaGrin includes several concrete mechanisms for limiting cost, loop, and content risk in an

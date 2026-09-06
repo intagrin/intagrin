@@ -1,3 +1,7 @@
+---
+description: Agent Skills are IntaGrin's native answer to context rot — declare a name and description the model sees cheaply, loading full content only when needed.
+---
+
 # Agent Skills
 
 Agent Skills are IntaGrin's `ai.yaml`-native answer to *context rot*: the well-documented pattern

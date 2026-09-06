@@ -1,3 +1,7 @@
+---
+description: A blueprint for a voice AI customer support agent — wire IntaGrin's FastAPI backend to Twilio, Vapi, or LiveKit.
+---
+
 # Example: Voice AI Customer Support
 
 Because IntaGrin is built on top of FastAPI, it can be wired to voice platforms like Twilio, Vapi, or LiveKit via a webhook.

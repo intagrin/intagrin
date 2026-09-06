@@ -1,3 +1,7 @@
+---
+description: Every field IntaGrin recognizes in ai.yaml, generated directly from the framework's Pydantic configuration schema.
+---
+
 # Configuration Reference
 
 Every field IntaGrin recognizes in `ai.yaml`, grouped by section (one per config model), generated directly from the Pydantic schema in `src/intagrin/config/schema.py`.

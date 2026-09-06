@@ -7,11 +7,21 @@
 </p>
 
 <p align="center">
-    <img src="https://img.shields.io/badge/version-0.2.0-blue.svg" alt="Version 0.2.0"/>
+    <a href="https://pypi.org/project/intagrin/">
+        <img src="https://img.shields.io/pypi/v/intagrin.svg" alt="PyPI version"/>
+    </a>
+    <a href="https://pypi.org/project/intagrin/">
+        <img src="https://img.shields.io/pypi/dm/intagrin.svg" alt="PyPI downloads"/>
+    </a>
+    <a href="https://pypi.org/project/intagrin/">
+        <img src="https://img.shields.io/pypi/pyversions/intagrin.svg" alt="Python versions"/>
+    </a>
+    <a href="https://github.com/intagrin/intagrin/actions/workflows/ci.yml">
+        <img src="https://github.com/intagrin/intagrin/actions/workflows/ci.yml/badge.svg" alt="CI"/>
+    </a>
     <a href="./LICENSE">
         <img src="https://img.shields.io/badge/License-Apache%202.0-success.svg" alt="License"/>
     </a>
-    <img src="https://img.shields.io/badge/status-active-brightgreen.svg" alt="Active"/>
 </p>
 
 > **Status:** IntaGrin is under active development.

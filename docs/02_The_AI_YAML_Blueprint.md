@@ -1,3 +1,7 @@
+---
+description: How ai.yaml declares your entire multi-agent system — agents, models, tools, and routing — in one file, with a full production-ready example.
+---
+
 # The ai.yaml Blueprint
 
 The heart of IntaGrin is the `ai.yaml` file. Instead of writing messy Python code to wire up agents, you declare your entire system architecture here.

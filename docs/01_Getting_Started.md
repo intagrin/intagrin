@@ -1,3 +1,7 @@
+---
+description: Get started with IntaGrin, the Python framework for declarative multi-agent LLM orchestration — install the CLI, scaffold a project, and run your first ai.yaml swarm.
+---
+
 # Getting Started with IntaGrin
 
 Welcome to **IntaGrin**, a Python framework for declarative agentic orchestration.

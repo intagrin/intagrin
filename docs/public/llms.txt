@@ -1,0 +1,52 @@
+# IntaGrin
+
+> IntaGrin is a declarative, YAML-driven Python framework for building multi-agent LLM systems. Consumers write an `ai.yaml` (agents, routing, tools, memory, guardrails) and vanilla Python tool functions — never hand-wired graph-routing code. `inta verify` statically checks the declared routing graph for cycles and unbounded cost before anything runs.
+
+Source: https://github.com/intagrin/intagrin
+PyPI: https://pypi.org/project/intagrin/
+Docs: https://docs.intagrin.com/
+
+## Getting Started
+
+- [Introduction & Philosophy](https://docs.intagrin.com/01_Getting_Started): Install the CLI, scaffold a project, run your first ai.yaml swarm.
+- [The ai.yaml Blueprint](https://docs.intagrin.com/02_The_AI_YAML_Blueprint): The full schema for declaring agents, models, tools, and routing in one file.
+
+## Agents & Workflows
+
+- [Choosing an Orchestration Primitive](https://docs.intagrin.com/03_Choosing_an_Orchestration_Primitive): Decision guide for handoffs, delegations, routers, auto_route, spawns, and workflows.
+- [Routing & Handoffs](https://docs.intagrin.com/03_Agent_Handoffs_and_Routing): The deterministic state-machine handoff model.
+- [Dynamic Agent Spawning](https://docs.intagrin.com/03_Dynamic_Agent_Spawning): Creating new agents at runtime.
+- [Shared Typed State (Redux)](https://docs.intagrin.com/04_Shared_State_Redux): The global, persisted, typed state dictionary agents share.
+- [Episodic Memory](https://docs.intagrin.com/14_Episodic_Memory): Structured, queryable agent experience memory.
+
+## Tools & Knowledge
+
+- [Custom Tools & Actions](https://docs.intagrin.com/03_Tools_and_Actions): Writing tools as plain Python functions.
+- [Tools & MCP Integration](https://docs.intagrin.com/05_Custom_Tools_and_MCP): Local tools and Model Context Protocol servers.
+- [Advanced RAG & HyDE](https://docs.intagrin.com/06_Advanced_RAG_and_HyDE): The zero-dependency in-process vector RAG engine.
+- [Agent Skills](https://docs.intagrin.com/15_Agent_Skills): Progressive-disclosure skills to counter context rot.
+
+## Enterprise & Safety
+
+- [Human-In-The-Loop (HITL)](https://docs.intagrin.com/07_Human_In_The_Loop): Pausing on flagged tools for human approval.
+- [Security & Guardrails](https://docs.intagrin.com/08_Security_and_Reliability): Cost, loop, and content-risk controls.
+- [Security Audit & Threat Model](https://docs.intagrin.com/08_Security_Audit): Third-party-style InfoSec review.
+- [REST API & SSE Streaming](https://docs.intagrin.com/09_API_and_Streaming): The FastAPI backend and streaming endpoints.
+- [A2A Interoperability](https://docs.intagrin.com/16_A2A_Interoperability): Exposing IntaGrin apps as A2A protocol agents.
+
+## Deployment & Operations
+
+- [Production Deployment](https://docs.intagrin.com/04_Production_Deployment): Containerized deployment via `inta deploy`.
+
+## Developer Experience
+
+- [AI Toolkit & Copilots](https://docs.intagrin.com/10_AIToolkit_and_Copilots): Generating IDE rule/skill files via `inta copilot`.
+- [IntaGrin Studio](https://docs.intagrin.com/11_IntaGrin_Studio): The visual node editor for swarms.
+- [Error Code Reference](https://docs.intagrin.com/12_Error_Reference): Every structured error code.
+- [Configuration Reference](https://docs.intagrin.com/13_Configuration_Reference): Every field recognized in ai.yaml.
+
+## Blueprints
+
+- [Coding Agent](https://docs.intagrin.com/05_Example_Coding_Agent): Architect/coder/verifier self-healing loop.
+- [SOC Analyst](https://docs.intagrin.com/06_Example_SOC_Analyst): Cybersecurity triage/forensics/containment swarm.
+- [Voice Agent](https://docs.intagrin.com/07_Example_Voice_Agent): Voice AI customer support via Twilio/Vapi/LiveKit.

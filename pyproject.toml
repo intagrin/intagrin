@@ -12,6 +12,29 @@ authors = [
     { name = "Anoop P S", email = "hello@intagrin.com" },
 ]
 requires-python = ">=3.11"
+keywords = [
+    "ai",
+    "agents",
+    "llm",
+    "multi-agent",
+    "orchestration",
+    "yaml",
+    "swarm",
+    "autonomous-agents",
+    "agentic",
+    "litellm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "typer>=0.12.0",
     "rich>=13.7.0",

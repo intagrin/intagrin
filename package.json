@@ -9,6 +9,7 @@
     "test:monitor": "node --test tests/browser/*.test.js"
   },
   "devDependencies": {
+    "sitemap": "^9.0.1",
     "vitepress": "^1.0.2"
   },
   "dependencies": {
