@@ -151,6 +151,19 @@ def validate_condition_syntax(expr: str, known_functions: set[str] | None = None
     return _check(tree.body)
 
 
+def condition_state_keys(expr: str) -> set[str]:
+    """The bare state-key identifiers a condition string references — every `ast.Name` node,
+    parsed with the exact same grammar `safe_eval`/`validate_condition_syntax` use. Powers
+    `inta why <key>` (cli.py), which needs to find every router/`available_when` gate that reads
+    a given key without evaluating anything. Returns an empty set for a condition that doesn't
+    even parse — reporting *that* is `validate_condition_syntax`'s job, not this one's."""
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError:
+        return set()
+    return {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+
+
 class SwarmRouter:
     """Handles all deterministic and semantic routing for the execution graph."""
     

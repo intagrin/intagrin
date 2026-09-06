@@ -112,14 +112,17 @@ IntaGrin provides a unified, deeply integrated Command Line Interface (CLI) that
 
 ### Quality Assurance & Security
 * `inta fuzz` — Generates adversarial prompts (prompt injection, PII extraction, boundary overflows) and runs them against your live agents. Pass/fail detection is keyword-heuristic — a useful smoke test, not a substitute for a real security review.
-* `inta verify` — Static cycle detection across handoffs and deterministic routers, delegation depth/turn bounds, and an explicit worst-case cost accounting that lists what's bounded vs. not.
+* `inta verify` — Static cycle detection across handoffs and deterministic routers, delegation depth/turn bounds, and an explicit worst-case cost accounting that lists what's bounded vs. not. Add `--watch` to rerun automatically whenever `ai.yaml`, `schemas.py`, `tools/`, or `prompts/` change.
+* `inta doctor` — Checks the most common reasons a run fails before you hit them one at a time: `ai.yaml` parses, an API key is set for `model.primary`/`model.fallback`, `state_schema` actually loads if configured, every MCP tool's launch command is on `PATH`, and the app/every agent has a `description:` set.
+* `inta why <state_key>` — Traces which routers' conditions and `available_when` tool gates read a given shared-state key, whether it's declared in `state_schema`, and (best-effort) which prompts/tools mention writing it.
+* `inta explain` — Prints a plain-English walkthrough of what `ai.yaml` actually defines — agent roles, tools, handoffs/delegations/routers, and safety limits — built from the parsed config and each `description:` field, for a teammate or reviewer who'd rather not parse YAML.
 * `inta simulate --config <candidate.yaml>` — Shadow Replay: re-evaluates a candidate `ai.yaml`'s routers, circuit breakers, and `requires_approval` flags against real checkpointed sessions — zero new LLM calls, zero re-executed tools — and reports what would actually change before you deploy it. Limited to config changes that can't alter what the LLM itself generates (prompts/models/tool identity); anything else is reported as not-yet-simulatable rather than guessed at.
 * `inta synth` — Generates boundary-case test inputs (numeric/string edge cases, handoff transitions) from your tool signatures and agent config into `tests/evals.yaml`.
-* `inta eval` — Runs the cases in `tests/evals.yaml` against your live agents and checks expected agent/tool/output assertions, with optional LLM-as-judge scoring.
+* `inta eval` — Runs the cases in `tests/evals.yaml` against your live agents and checks expected agent/tool/output assertions, with optional LLM-as-judge scoring. Prints an aggregate routing-accuracy summary (and a separate `auto_route` semantic-routing subset) whenever any case sets `expected_agent` — the baseline you'd want before ever trading `auto_route`'s per-turn LLM routing call for a cheaper heuristic.
 * `inta tune` — Iteratively repairs failing prompts against `tests/evals.yaml`. Snapshots every prompt it touches first and rolls back to the original if it doesn't converge within the iteration limit.
 
 ### Runtime, Debugging, & Observability
-* `inta dev` — Launch the local developer environment with hot-reloading.
+* `inta dev` — Launch the local developer environment with hot-reloading. Add `--once "message"` to send a single message non-interactively and print the reply, for scripting or quick prompt-edit iteration without a full `tests/evals.yaml`. Set `model.primary` (or an agent's `model_override`) to `"mock/echo"` in `ai.yaml` to run the whole loop with zero API key and zero network calls, to see the wiring work before configuring a real model.
 * `inta run <workflow>` — Execute a named autonomous workflow directly from the terminal.
 * `inta monitor` — Launch the local Web Dashboard to watch agent handoffs, tool calls, and token/cost telemetry live over SSE.
 * `inta diagnose` — Run a batch of real requests (your `tests/evals.yaml`, or a small generated probe battery) and report computed metrics: context-window utilization, tool error rate, cost, and latency.

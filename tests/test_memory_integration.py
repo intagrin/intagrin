@@ -173,6 +173,74 @@ def test_shared_memory_save_and_load_round_trip_against_real_postgres(pg_checkpo
     assert content == "Updated preference."
 
 
+def test_approvers_add_verify_revoke_round_trip_against_real_postgres(pg_checkpointer):
+    """runtime/approvers.py switched from a raw postgres_connect() per call to the shared
+    connection pool (pooled_postgres_connection) — proves that swap didn't break anything by
+    actually issuing, verifying, and revoking a credential against a real Postgres instance."""
+    from types import SimpleNamespace
+
+    from intagrin.runtime.approvers import add_approver, list_approvers, revoke_approver, verify_secret
+
+    mem_cfg = SimpleNamespace(type="postgres", connection_url=TEST_POSTGRES_URL, env_var=None)
+    approver_id = f"test_approver_{time.time()}"
+
+    add_approver(mem_cfg, None, approver_id, "s3cr3t-value")
+    assert verify_secret(mem_cfg, None, "s3cr3t-value") == approver_id
+    assert verify_secret(mem_cfg, None, "wrong-value") is None
+
+    rows = list_approvers(mem_cfg, None)
+    assert any(r["approver_id"] == approver_id and r["revoked_at"] is None for r in rows)
+
+    assert revoke_approver(mem_cfg, None, approver_id) is True
+    assert verify_secret(mem_cfg, None, "s3cr3t-value") is None
+    assert revoke_approver(mem_cfg, None, approver_id) is False  # already revoked
+
+
+def test_rate_limiter_counts_real_postgres_run_logs(pg_checkpointer):
+    """rate_limiter.py's _count_since/_cost_and_tokens_since switched to pooled_postgres_connection
+    too — proves check_rate_limit actually trips against rows written to a real Postgres
+    run_logs table, not just a mocked connection."""
+    from types import SimpleNamespace
+
+    from intagrin.errors import IntaGrinError
+    from intagrin.runtime.rate_limiter import check_rate_limit
+    from intagrin.runtime.run_logger import ensure_schema, record_run_log
+
+    mem_cfg = SimpleNamespace(type="postgres", connection_url=TEST_POSTGRES_URL, env_var=None)
+    user_context = f"test_tenant_{time.time()}"
+    ensure_schema(mem_cfg, None)
+    for _ in range(3):
+        record_run_log(
+            mem_cfg, None, session_id=f"{user_context}:s1", endpoint="/chat", agent="triage",
+            status="completed", error=None, tokens_delta=1, cost_delta=0.0,
+            total_tokens=1, total_cost=0.0, message_count=1, latency_ms=1,
+        )
+
+    rate_cfg = SimpleNamespace(
+        max_requests_per_window=3, window_seconds=3600,
+        max_cost_per_caller_per_day=None, max_tokens_per_caller_per_day=None,
+    )
+    with pytest.raises(IntaGrinError) as exc_info:
+        check_rate_limit(mem_cfg, None, user_context, rate_cfg)
+    assert exc_info.value.code == "IG-RT-008"
+
+
+def test_episodic_memory_save_and_recall_round_trip_against_real_postgres(pg_checkpointer):
+    """runtime/episodic_memory.py switched to pooled_postgres_connection too — proves
+    save_episode/query_episodes still round-trip against a real Postgres instance."""
+    from types import SimpleNamespace
+
+    from intagrin.runtime.episodic_memory import query_episodes, save_episode
+
+    mem_cfg = SimpleNamespace(type="postgres", connection_url=TEST_POSTGRES_URL, env_var=None)
+    scope_key = f"test_episodes_{time.time()}"
+
+    save_episode(mem_cfg, None, scope_key, "sess1", "preference", "User prefers window seats.", None, None)
+    rows = query_episodes(mem_cfg, None, scope_key, None, None, limit=10)
+    assert len(rows) == 1
+    assert rows[0]["content"] == "User prefers window seats."
+
+
 # --- Redis ----------------------------------------------------------------------------------
 
 redis = pytest.importorskip("redis")

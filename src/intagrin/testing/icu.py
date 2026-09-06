@@ -14,6 +14,7 @@ LATENCY_SLA_SECONDS = 3.0
 CPI_ELEVATED_THRESHOLD = 0.65
 CPI_CRITICAL_THRESHOLD = 0.85
 TOOL_ERROR_RATE_THRESHOLD = 0.10
+REPEATED_CALL_RATE_THRESHOLD = 0.15
 
 
 class AgentICUDiagnostics:
@@ -83,6 +84,23 @@ class AgentICUDiagnostics:
         total_tool_errors = sum(r.tool_error_count for r in results)
         crashed = [r for r in results if r.crashed]
 
+        # Context-distraction proxy: a tool call whose exact (name, args) pair already occurred
+        # earlier in the *same case* — the agent redid work it already had the result for,
+        # usually because the original result scrolled out of its effective attention. Counted
+        # within a case, not across cases, since two different cases legitimately calling the
+        # same tool with the same args is not a sign of anything wrong.
+        repeated_calls = 0
+        total_logged_calls = 0
+        for r in results:
+            seen: set[tuple[str, str]] = set()
+            for call in r.tool_call_log:
+                total_logged_calls += 1
+                if call in seen:
+                    repeated_calls += 1
+                else:
+                    seen.add(call)
+        repeated_tool_call_rate = (repeated_calls / total_logged_calls) if total_logged_calls else 0.0
+
         avg_tokens_per_run = total_tokens / n if n else 0
         avg_latency = total_duration / n if n else 0.0
         max_latency = max((r.duration_seconds for r in results), default=0.0)
@@ -103,6 +121,9 @@ class AgentICUDiagnostics:
             "total_tool_calls": total_tool_calls,
             "total_tool_errors": total_tool_errors,
             "tool_error_rate": tool_error_rate,
+            "repeated_tool_calls": repeated_calls,
+            "total_logged_tool_calls": total_logged_calls,
+            "repeated_tool_call_rate": repeated_tool_call_rate,
             "avg_latency": avg_latency,
             "max_latency": max_latency,
             "burn_rate": burn_rate,
@@ -128,6 +149,17 @@ class AgentICUDiagnostics:
         epistemic_color = "green" if m["crash_rate"] == 0 else "red"
         epistemic_status = "STABLE" if m["crash_rate"] == 0 else f"{len(m['crashed'])}/{m['n']} runs crashed"
 
+        repeat_color = (
+            "green" if m["repeated_tool_call_rate"] == 0
+            else "yellow" if m["repeated_tool_call_rate"] < REPEATED_CALL_RATE_THRESHOLD else "red"
+        )
+        repeat_status = (
+            f"{m['repeated_tool_calls']}/{m['total_logged_tool_calls']} calls repeated "
+            f"({m['repeated_tool_call_rate']:.0%})"
+            if m["total_logged_tool_calls"]
+            else "no tool calls observed"
+        )
+
         latency_pass = m["avg_latency"] <= LATENCY_SLA_SECONDS
         latency_color = "green" if latency_pass else "red"
         latency_status = f"{'within' if latency_pass else 'EXCEEDS'} {LATENCY_SLA_SECONDS:.0f}s SLA"
@@ -143,6 +175,11 @@ class AgentICUDiagnostics:
             f"[{cpi_color}]{cpi_status}[/{cpi_color}]",
         )
         table.add_row("Tool error rate", tea_status, f"[{tea_color}]{'OK' if m['tool_error_rate'] < TOOL_ERROR_RATE_THRESHOLD else 'ELEVATED'}[/{tea_color}]")
+        table.add_row(
+            "Repeated tool calls",
+            repeat_status,
+            f"[{repeat_color}]{'OK' if m['repeated_tool_call_rate'] < REPEATED_CALL_RATE_THRESHOLD else 'ELEVATED'}[/{repeat_color}]",
+        )
         table.add_row("Token burn rate", f"{m['burn_rate']:.1f} tokens/sec" if m["burn_rate"] else "n/a", "[cyan]—[/cyan]")
         table.add_row("Crash rate", epistemic_status, f"[{epistemic_color}]{'PASS' if m['crash_rate'] == 0 else 'FAIL'}[/{epistemic_color}]")
         table.add_row(
@@ -166,6 +203,15 @@ class AgentICUDiagnostics:
                 f"Tool error rate {m['tool_error_rate']:.0%} exceeds the "
                 f"{TOOL_ERROR_RATE_THRESHOLD:.0%} threshold ({m['total_tool_errors']}/"
                 f"{m['total_tool_calls']} calls) — check tool argument schemas and docstrings."
+            )
+        if m["repeated_tool_call_rate"] >= REPEATED_CALL_RATE_THRESHOLD:
+            suspects.append(
+                f"Repeated tool call rate {m['repeated_tool_call_rate']:.0%} exceeds the "
+                f"{REPEATED_CALL_RATE_THRESHOLD:.0%} threshold ({m['repeated_tool_calls']}/"
+                f"{m['total_logged_tool_calls']} calls) — the agent is redoing identical tool "
+                "calls, likely context distraction; consider lazy_load_tools, a tighter "
+                "state_schema, or moving bulky reference material into a Skill loaded on demand "
+                "(see docs/15_Agent_Skills.md)."
             )
         if m["cpi"] >= CPI_ELEVATED_THRESHOLD:
             suspects.append(

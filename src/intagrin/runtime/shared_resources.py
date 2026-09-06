@@ -22,6 +22,7 @@ class SharedResources:
         agent_prompts: dict[str, str],
         tools_requiring_approval: dict[str, dict],
         untrusted_tools: set[str] | None = None,
+        mcp_task_wait_seconds: dict[str, int | None] | None = None,
     ):
         self.mcp_manager = mcp_manager
         self.global_tool_schemas = global_tool_schemas
@@ -29,6 +30,7 @@ class SharedResources:
         self.agent_prompts = agent_prompts
         self.tools_requiring_approval = tools_requiring_approval
         self.untrusted_tools = untrusted_tools if untrusted_tools is not None else set()
+        self.mcp_task_wait_seconds = mcp_task_wait_seconds if mcp_task_wait_seconds is not None else {}
 
 
 class SharedResourcesCache:
@@ -83,6 +85,7 @@ class SharedResourcesCache:
                 agent_prompts=builder.agent_prompts,
                 tools_requiring_approval=builder.tools_requiring_approval,
                 untrusted_tools=builder.untrusted_tools,
+                mcp_task_wait_seconds=builder.mcp_task_wait_seconds,
             )
             self._entries[key] = (mtime, resources)
             return resources

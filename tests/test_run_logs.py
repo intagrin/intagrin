@@ -8,6 +8,10 @@ def _sqlite_mem_cfg(db_path=None):
     cfg = MagicMock()
     cfg.type = "sqlite"
     cfg.db_path = db_path
+    # A bare MagicMock attribute is truthy, which would make record_run_log's opportunistic
+    # pruning think retention is configured and (on its ~0.5% random roll) try
+    # timedelta(days=<MagicMock>) — explicit None matches a real MemoryConfig's own default.
+    cfg.run_log_retention_days = None
     return cfg
 
 
@@ -68,3 +72,71 @@ def test_record_run_log_never_raises_on_write_failure(tmp_path):
 
     mock_log_error.assert_called_once()
     assert "disk full" in mock_log_error.call_args[0][0]
+
+
+def test_run_log_retention_days_prunes_old_rows_but_keeps_recent_ones(tmp_path):
+    """run_logs is otherwise append-only forever — memory.run_log_retention_days opportunistically
+    deletes rows older than the cutoff. Forces the random trigger deterministically instead of
+    relying on its real ~0.5% probability (_PRUNE_PROBABILITY)."""
+    from datetime import UTC, datetime, timedelta
+
+    cfg = _sqlite_mem_cfg()
+    record_run_log(
+        cfg, tmp_path, session_id="tenant:old", endpoint="/chat", agent="a",
+        status="completed", error=None, tokens_delta=1, cost_delta=0.0,
+        total_tokens=1, total_cost=0.0, message_count=1, latency_ms=1,
+    )
+
+    db_path = tmp_path / ".ai" / "memory.db"
+    old_created_at = (datetime.now(UTC) - timedelta(days=100)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "UPDATE run_logs SET created_at = ? WHERE session_id = 'tenant:old'",
+            (old_created_at,),
+        )
+        conn.commit()
+
+    cfg.run_log_retention_days = 30
+    with patch("intagrin.runtime.run_logger.random.random", return_value=0.0):
+        record_run_log(
+            cfg, tmp_path, session_id="tenant:new", endpoint="/chat", agent="a",
+            status="completed", error=None, tokens_delta=1, cost_delta=0.0,
+            total_tokens=1, total_cost=0.0, message_count=1, latency_ms=1,
+        )
+
+    with sqlite3.connect(str(db_path)) as conn:
+        session_ids = {row[0] for row in conn.execute("SELECT session_id FROM run_logs")}
+    assert session_ids == {"tenant:new"}
+
+
+def test_run_log_retention_days_none_never_prunes(tmp_path):
+    """The default (run_log_retention_days=None) must not prune anything, even on the lucky
+    random roll — pruning is strictly opt-in."""
+    from datetime import UTC, datetime, timedelta
+
+    cfg = _sqlite_mem_cfg()
+    record_run_log(
+        cfg, tmp_path, session_id="tenant:ancient", endpoint="/chat", agent="a",
+        status="completed", error=None, tokens_delta=1, cost_delta=0.0,
+        total_tokens=1, total_cost=0.0, message_count=1, latency_ms=1,
+    )
+
+    db_path = tmp_path / ".ai" / "memory.db"
+    old_created_at = (datetime.now(UTC) - timedelta(days=9999)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "UPDATE run_logs SET created_at = ? WHERE session_id = 'tenant:ancient'",
+            (old_created_at,),
+        )
+        conn.commit()
+
+    with patch("intagrin.runtime.run_logger.random.random", return_value=0.0):
+        record_run_log(
+            cfg, tmp_path, session_id="tenant:new2", endpoint="/chat", agent="a",
+            status="completed", error=None, tokens_delta=1, cost_delta=0.0,
+            total_tokens=1, total_cost=0.0, message_count=1, latency_ms=1,
+        )
+
+    with sqlite3.connect(str(db_path)) as conn:
+        session_ids = {row[0] for row in conn.execute("SELECT session_id FROM run_logs")}
+    assert "tenant:ancient" in session_ids

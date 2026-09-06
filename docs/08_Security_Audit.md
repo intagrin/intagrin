@@ -14,7 +14,7 @@ However, because this framework exposes LLMs directly to untrusted user input an
 
 ### 1.1 Tenant Isolation on Session IDs
 **Status:** `Remediated for built-in HTTP and voice endpoints`
-**Current behavior:** `POST /chat`, `/chat/stream`, `/stream`, `/resume`, `/sessions`, the monitor proxy, and `/ws/voice` prefix checkpoint IDs with the tenant ID returned by custom authentication. A client supplies only its local session ID; it cannot select another tenant's checkpoint namespace.
+**Current behavior:** `POST /chat`, `/chat/stream`, `/stream`, `/resume`, `/sessions`, `/pending-approvals`, the monitor proxy, and `/ws/voice` prefix checkpoint IDs with the tenant ID returned by custom authentication. A client supplies only its local session ID; it cannot select another tenant's checkpoint namespace.
 **Deployment requirement:** Use `server.auth.type: custom` and return a stable tenant ID for multi-tenant deployments. The `none` and `api_key` modes deliberately operate as the single shared `global_tenant`; custom checkpoint implementations must enforce the same namespace rule themselves.
 
 ### 1.2 Prompt Injection & Malicious Execution (RCE)

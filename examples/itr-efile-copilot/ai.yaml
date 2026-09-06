@@ -1,0 +1,119 @@
+version: "1.0"
+name: "ITRFilingCopilot"
+description: >
+  A multi-agent copilot that walks a resident individual through preparing an ITR-1 (Sahaj) income
+  tax return: intake, income collection, Chapter VI-A deductions, old-vs-new regime tax
+  computation, and a human-reviewed final JSON the taxpayer uploads to the e-filing portal
+  themselves. Every number is produced by a deterministic Python tool, never by the LLM's own
+  arithmetic — see tools/tax_engine.py.
+
+state_schema: "schemas.TaxpayerState"
+max_session_budget_usd: 1.50
+
+model:
+  primary: "gemini/gemini-3.5-flash-lite"
+  fallback: "gemini/gemini-3.5-flash"
+  # Low temperature deliberately — this is a tax filing assistant, not a creative one.
+  temperature: 0.2
+  guardrails:
+    mask_pii: true
+    system_safeguards: true
+    # PAN is deliberately NOT masked here — the taxpayer must be able to see and confirm their own
+    # PAN before filing. This backstops bank-account-shaped numbers (which should have gone
+    # through the out-of-band KYC form, ui/server.py, instead) and Aadhaar-shaped numbers (which
+    # this project never asks for or stores at all — see tools/kyc_store.py's docstring).
+    custom_module: "tools.custom_guardrails"
+
+memory:
+  type: "sqlite"
+  db_path: ".ai/memory.db"
+
+reducers:
+  - key: "filing_notes"
+    strategy: "append"
+
+circuit_breakers:
+  max_handoffs_per_session: 15
+  max_usd_cost_per_session: 1.50
+
+telemetry:
+  - "otel"
+
+server:
+  auth:
+    type: "api_key"
+    env_var: "ITR_COPILOT_API_KEY"
+    approver_env_var: "ITR_COPILOT_APPROVER_KEY"
+
+default_agent: "intake_agent"
+
+agents:
+  intake_agent:
+    description: "Collects PAN, name, DOB, assessment year, and regime preference. Points the taxpayer at the out-of-band KYC form for refund bank details."
+    system_prompt_file: "prompts/intake_agent.jinja2"
+    handoffs:
+      - "income_agent"
+    tools:
+      - name: "validate_pan"
+        module: "tools.itr_tools"
+      - name: "resolve_state_code"
+        module: "tools.itr_tools"
+      - name: "resolve_employer_category"
+        module: "tools.itr_tools"
+
+  income_agent:
+    description: "Collects salary, house property, and other-sources income, plus TDS credit from Form 26AS."
+    system_prompt_file: "prompts/income_agent.jinja2"
+    handoffs:
+      - "intake_agent"
+      - "deductions_agent"
+      - "tax_computation_agent"
+    routers:
+      # New regime disallows nearly every Chapter VI-A deduction, so there's nothing for
+      # deductions_agent to do — skip it deterministically instead of an LLM handoff round-trip.
+      - condition: "regime_preference == 'new'"
+        target: "tax_computation_agent"
+    tools:
+      - name: "compute_hra_exemption"
+        module: "tools.tax_engine"
+      - name: "compute_house_property_income"
+        module: "tools.tax_engine"
+      - name: "lookup_form26as_summary"
+        module: "tools.itr_tools"
+
+  deductions_agent:
+    description: "Collects and caps Chapter VI-A deductions (80C, 80D, 80TTA/80TTB) against their statutory limits."
+    system_prompt_file: "prompts/deductions_agent.jinja2"
+    handoffs:
+      - "income_agent"
+      - "tax_computation_agent"
+    tools:
+      - name: "check_deduction_limit"
+        module: "tools.itr_tools"
+      - name: "sum_deductions"
+        module: "tools.itr_tools"
+
+  tax_computation_agent:
+    description: "Computes tax liability under the old and/or new regime and recommends the better one — every figure comes from a deterministic tool, never LLM arithmetic."
+    system_prompt_file: "prompts/tax_computation_agent.jinja2"
+    handoffs:
+      - "deductions_agent"
+      - "income_agent"
+      - "filing_agent"
+    tools:
+      - name: "compute_tax_liability"
+        module: "tools.tax_engine"
+      - name: "compare_tax_regimes"
+        module: "tools.tax_engine"
+
+  filing_agent:
+    description: "Final human-reviewed confirmation and ITR-1 JSON generation. The point-of-no-return step for a session."
+    system_prompt_file: "prompts/filing_agent.jinja2"
+    response_schema: "schemas.FilingConfirmation"
+    handoffs:
+      - "tax_computation_agent"
+      - "deductions_agent"
+    tools:
+      - name: "generate_itr_json"
+        module: "tools.itr_tools"
+        requires_approval: true

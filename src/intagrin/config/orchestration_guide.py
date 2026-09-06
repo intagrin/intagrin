@@ -111,4 +111,25 @@ not "respond to what the user just said."
   multi-field rule, anything with a method call (`condition_functions`)? Both stay zero-LLM-cost
   and deterministic; `condition_functions` is not a step toward `handoffs`, it's a wider net for
   the same "skip the LLM" use case.
+
+## Related, but a different axis: `skills` vs `tools` vs `lazy_load_tools`
+
+Everything above is about *who talks to the user next* — a different question from *what an agent
+can see/do this turn*. These three are complementary, not competing, and often used together:
+
+| You want to... | Use |
+|---|---|
+| Give an agent a structured callable with typed arguments it invokes to take an action or fetch data | `tools:` |
+| Keep reusable domain instructions/reference material out of context until the agent decides it actually needs them | `skills:` (Agent Skills — see `load_skill`) |
+| Reduce context bloat from an agent having *many already-declared* `tools:` by semantically filtering which ones are shown each turn | `lazy_load_tools: true` |
+
+`tools:` is for doing something (calling an API, running a calculation) — the LLM gets a schema
+and a return value. `skills:` is for knowing something (a policy, a style guide, a worked example)
+too bulky to keep in the system prompt on every turn — the LLM gets a name + one-line description
+up front (via the auto-registered `load_skill` tool's schema) and pulls in the full text only when
+it decides to. `lazy_load_tools` doesn't add new capabilities at all — it's a semantic pre-filter
+over tools an agent already has, for when the sheer number of declared tools (not their content)
+is what's bloating context. An agent can use all three at once: a modest `tools:` list,
+`lazy_load_tools: true` because that list is long, and `skills:` for reference material none of
+those tools need to have inlined into every prompt.
 """

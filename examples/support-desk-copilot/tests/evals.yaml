@@ -1,0 +1,20 @@
+evaluations:
+  - name: "triage_looks_up_account_first"
+    agent: "triage_agent"
+    input: "Hi, I'm customer cus_1002 and I can't log in to my account."
+    expected_tool: "lookup_customer_account"
+
+  - name: "billing_looks_up_invoice_before_refunding"
+    agent: "billing_agent"
+    input: "Customer cus_1001 wants a refund on invoice inv_9001, they were double-charged."
+    expected_tool: "lookup_invoice"
+
+  - name: "technical_checks_service_status_first"
+    agent: "technical_agent"
+    input: "Customer cus_1003 (subscribed to auth-api, billing-api, search-api, sync-worker) says nothing works right now."
+    expected_tool: "check_service_status"
+
+  - name: "priority_agent_uses_account_lookup"
+    agent: "priority_support_agent"
+    input: "Enterprise customer cus_1003 wants a status update on their account."
+    expected_tool: "lookup_customer_account"

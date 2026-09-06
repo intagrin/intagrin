@@ -95,6 +95,31 @@ def test_rerun_warns_when_overwriting_differing_content(project):
     assert "my manual customization" not in rules_file.read_text()
 
 
+@pytest.mark.parametrize("agent", ["cursor", "claude", "copilot", "antigravity", "factory"])
+def test_agents_md_is_written_regardless_of_chosen_ide(project, agent):
+    """AGENTS.md is the tool-agnostic file read by Codex, Cursor, Aider, Copilot, Gemini CLI, and
+    Windsurf alike — it must land at the project root no matter which IDE-specific agent flavor
+    was picked, and it must not carry that IDE's own frontmatter (e.g. Cursor's MDC header)."""
+    result = _run_copilot(agent)
+    assert result.exit_code == 0, result.stdout
+
+    agents_md = project / "AGENTS.md"
+    assert agents_md.exists()
+    content = agents_md.read_text()
+    assert "# IntaGrin Architect Instructions" in content
+    assert "---" not in content.splitlines()[0]  # no YAML frontmatter fence up front
+
+
+def test_rerunning_copilot_leaves_agents_md_byte_identical(project):
+    _run_copilot("claude")
+    first = (project / "AGENTS.md").read_text()
+
+    _run_copilot("claude")
+    second = (project / "AGENTS.md").read_text()
+
+    assert first == second
+
+
 def test_invalid_agent_choice_errors_cleanly(project):
     result = _run_copilot("not-a-real-ide")
     assert result.exit_code == 1

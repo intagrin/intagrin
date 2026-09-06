@@ -7,7 +7,7 @@ import asyncio
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from intagrin.compiler.parser import ExecutionGraph
 from intagrin.compiler.verifier import GraphVerifier, console as verifier_console
@@ -142,6 +142,36 @@ def test_sandbox_tool_respects_requires_approval(tmp_path):
     asyncio.run(_run())
 
 
+def test_load_tool_config_uses_e2b_backend_when_configured(tmp_path):
+    """backend: e2b must dispatch to run_sandboxed_code_e2b, not the local subprocess path — and
+    must pass e2b_template through, never max_memory_mb (which has no e2b equivalent)."""
+    async def _run():
+        engine = RuntimeEngine(
+            graph=_sandbox_graph(backend="e2b", e2b_template="my-template"),
+            project_dir=tmp_path,
+            session_id="s3",
+        )
+        await engine.initialize()
+        engine.active_agent_name = "coder"
+
+        with (
+            patch(
+                "intagrin.runtime.engine.run_sandboxed_code_e2b", new_callable=AsyncMock
+            ) as mock_e2b,
+            patch("intagrin.runtime.engine.run_sandboxed_code", new_callable=AsyncMock) as mock_local,
+        ):
+            mock_e2b.return_value = "Exit code: 0\nstdout:\nfrom e2b"
+            result = await engine.execute_tool(
+                "run_code", {"code": "print(1)"}, interactive=False
+            )
+
+        mock_e2b.assert_awaited_once_with("print(1)", "python", 10, "my-template")
+        mock_local.assert_not_called()
+        assert "from e2b" in result
+
+    asyncio.run(_run())
+
+
 def test_verifier_advises_on_a_sandbox_tool_without_requires_approval():
     ai_yaml = """version: "1.0"
 name: "sandbox-verify-app"
@@ -194,3 +224,72 @@ agents:
         output = capture.get()
 
         assert "Sandbox tool(s) without requires_approval" not in output
+
+
+_E2B_AI_YAML = """version: "1.0"
+name: "sandbox-e2b-verify-app"
+default_agent: "coder"
+model:
+  primary: "gemini/gemini-2.5-flash"
+memory:
+  type: "sqlite"
+agents:
+  coder:
+    tools:
+      - name: "run_code"
+        type: "sandbox"
+        backend: "e2b"
+        requires_approval: true
+"""
+
+
+def test_verifier_warns_when_e2b_backend_but_package_not_installed():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(_E2B_AI_YAML)
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with patch("intagrin.compiler.verifier.importlib.util.find_spec", return_value=None):
+            with verifier_console.capture() as capture:
+                verifier.verify()
+        output = capture.get()
+
+        assert "'e2b' package isn't installed" in output
+        assert "coder.run_code" in output
+
+
+def test_verifier_nudges_when_e2b_api_key_not_set():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(_E2B_AI_YAML)
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with (
+            patch("intagrin.compiler.verifier.importlib.util.find_spec", return_value=object()),
+            patch.dict(os.environ, {}, clear=False),
+        ):
+            os.environ.pop("E2B_API_KEY", None)
+            with verifier_console.capture() as capture:
+                verifier.verify()
+        output = capture.get()
+
+        assert "E2B_API_KEY isn't set" in output
+        assert "coder.run_code" in output
+
+
+def test_verifier_silent_on_e2b_backend_when_package_and_key_are_present():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(_E2B_AI_YAML)
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with (
+            patch("intagrin.compiler.verifier.importlib.util.find_spec", return_value=object()),
+            patch.dict(os.environ, {"E2B_API_KEY": "test-key"}),
+        ):
+            with verifier_console.capture() as capture:
+                verifier.verify()
+        output = capture.get()
+
+        assert "'e2b' package isn't installed" not in output
+        assert "E2B_API_KEY isn't set" not in output

@@ -38,7 +38,8 @@ export default defineConfig({
         items: [
           { text: "Custom Tools & Actions", link: "/03_Tools_and_Actions" },
           { text: "Tools & MCP Integration", link: "/05_Custom_Tools_and_MCP" },
-          { text: "Advanced RAG & HyDE", link: "/06_Advanced_RAG_and_HyDE" }
+          { text: "Advanced RAG & HyDE", link: "/06_Advanced_RAG_and_HyDE" },
+          { text: "Agent Skills", link: "/15_Agent_Skills" }
         ]
       },
       {
@@ -47,7 +48,8 @@ export default defineConfig({
           { text: "Human-In-The-Loop (HITL)", link: "/07_Human_In_The_Loop" },
           { text: "Security & Guardrails", link: "/08_Security_and_Reliability" },
           { text: "Security Audit & Threat Model", link: "/08_Security_Audit" },
-          { text: "REST API & SSE Streaming", link: "/09_API_and_Streaming" }
+          { text: "REST API & SSE Streaming", link: "/09_API_and_Streaming" },
+          { text: "A2A Interoperability", link: "/16_A2A_Interoperability" }
         ]
       },
       {

@@ -14,6 +14,8 @@ model:
     mask_pii: true
 memory:
   type: sqlite
+telemetry:
+  - "otel"
 tools:
   - name: create_itinerary
     module: tools.travel_tools

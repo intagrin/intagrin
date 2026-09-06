@@ -189,6 +189,36 @@ def test_get_logs_returns_empty_list_for_a_fresh_project_with_no_runs_yet(projec
     assert get_logs(user_context="global_tenant") == []
 
 
+def test_get_logs_since_id_filters_to_only_newer_rows(project):
+    """A fleet console polling several deployed projects wants to pass the highest id it has
+    already seen and get back only what's new, instead of re-fetching the full window every
+    time."""
+    from intagrin.compiler.parser import parse_project
+    from intagrin.runtime.memory import build_checkpointer
+    from intagrin.runtime.run_logger import record_run_log
+
+    graph = parse_project(project)
+    build_checkpointer(graph.config.memory, project)
+    for i in range(3):
+        record_run_log(
+            graph.config.memory,
+            project,
+            session_id=f"global_tenant:s{i}",
+            endpoint="/chat",
+            agent="triage",
+            status="success",
+        )
+
+    all_logs = get_logs(user_context="global_tenant")
+    assert len(all_logs) == 3
+    ids = sorted(log["id"] for log in all_logs)
+
+    newer = get_logs(since_id=ids[0], user_context="global_tenant")
+    assert {log["id"] for log in newer} == set(ids[1:])
+
+    assert get_logs(since_id=ids[-1], user_context="global_tenant") == []
+
+
 def test_stream_events_returns_a_streaming_response_without_blocking(project):
     """Constructing the StreamingResponse must not itself start consuming the (infinite)
     event_generator — this call must return immediately."""

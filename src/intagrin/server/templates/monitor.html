@@ -49,6 +49,7 @@
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://unpkg.com/reactflow@11.10.1/dist/umd/index.js"></script>
+    <script src="https://unpkg.com/@dagrejs/dagre@1.1.4/dist/dagre.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <link rel="stylesheet" href="https://unpkg.com/reactflow@11.10.1/dist/style.css" />
 
@@ -610,6 +611,15 @@
             // this a rapid double-click on either button had no visual feedback and nothing
             // stopped a second /api/resume firing before the first one returned.
             const [approvalAction, setApprovalAction] = useState(null);
+            // Surfaces a failed /api/resume (e.g. a 403 from a project that configures
+            // server.auth.approver_env_var/approvers — approving then requires a separate
+            // reviewer credential the requester's own session auth doesn't satisfy). Without
+            // this the buttons just silently reset on a non-ok response, which looks exactly
+            // like a stuck approval: no error, no state change, no clue why.
+            const [approvalError, setApprovalError] = useState(null);
+            const [approverKey, setApproverKey] = useState(() => {
+                try { return localStorage.getItem('intagrin_approver_key') || ''; } catch { return ''; }
+            });
             // The Thermodynamic HUD used to float absolutely over the message list (top-16
             // right-4) — with min-w-[250px] sitting right where right-aligned user bubbles
             // appear near the top of a short conversation, it visibly covered them. Now it's a
@@ -871,17 +881,42 @@
                                             </>
                                         );
                                     })()}
+                                    {/* Only relevant when the project sets server.auth.approver_env_var/approvers —
+                                        approving then requires a separate reviewer credential, deliberately distinct
+                                        from the requester's own session auth. Persisted locally (per-browser) purely
+                                        as a convenience so re-approving in the same session doesn't mean retyping it. */}
+                                    <div className="mb-3">
+                                        <input
+                                            type="password"
+                                            value={approverKey}
+                                            onChange={e => {
+                                                setApproverKey(e.target.value);
+                                                try { localStorage.setItem('intagrin_approver_key', e.target.value); } catch {}
+                                            }}
+                                            placeholder="Approver key (only if this project requires one)"
+                                            className="w-full text-xs bg-black/20 border border-yellow-500/20 rounded-lg px-3 py-2 text-neutral-200 placeholder-neutral-500 focus:outline-none focus:border-yellow-500/50"
+                                        />
+                                    </div>
+                                    {approvalError && (
+                                        <div className="mb-3 text-xs text-red-300 bg-red-950/40 border border-red-500/30 rounded-lg px-3 py-2">
+                                            {approvalError}
+                                        </div>
+                                    )}
                                     <div className="flex gap-3">
                                         <button
                                             disabled={loading}
                                             className="flex-1 py-2.5 px-4 flex items-center justify-center gap-2 bg-gradient-to-b from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 disabled:from-neutral-600 disabled:to-neutral-700 disabled:cursor-not-allowed disabled:opacity-60 text-white font-semibold rounded-lg shadow-lg shadow-emerald-950/40 hover:shadow-emerald-500/30 transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]"
                                             onClick={async () => {
                                                 setApprovalAction('approve');
+                                                setApprovalError(null);
                                                 setLoading(true);
                                                 try {
                                                     const res = await fetch('/api/resume', {
                                                         method: 'POST',
-                                                        headers: { 'Content-Type': 'application/json' },
+                                                        headers: {
+                                                            'Content-Type': 'application/json',
+                                                            ...(approverKey ? { 'X-Approver-Key': approverKey } : {}),
+                                                        },
                                                         body: JSON.stringify({ session_id: activeSessionId, approved: true })
                                                     });
                                                     if (res.ok) {
@@ -895,6 +930,12 @@
                                                         // researched itinerary that still needed the user's own review.
                                                         const data = await res.json();
                                                         setMessages(prev => [...prev, { role: 'assistant', content: data.response, agent: data.active_agent }]);
+                                                    } else {
+                                                        // Previously silently ignored (see approvalError above) — a 403 (missing/
+                                                        // wrong approver key) or 400 (nothing left to resume) looked identical to
+                                                        // the button just not working.
+                                                        const err = await res.json().catch(() => ({}));
+                                                        setApprovalError(err.detail || `Approval failed (HTTP ${res.status}).`);
                                                     }
                                                 } finally {
                                                     setLoading(false);
@@ -918,6 +959,7 @@
                                             className="flex-1 py-2.5 px-4 flex items-center justify-center gap-2 bg-gradient-to-b from-red-500 to-red-600 hover:from-red-400 hover:to-red-500 disabled:from-neutral-600 disabled:to-neutral-700 disabled:cursor-not-allowed disabled:opacity-60 text-white font-semibold rounded-lg shadow-lg shadow-red-950/40 hover:shadow-red-500/30 transition-all duration-150 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]"
                                             onClick={async () => {
                                                 setApprovalAction('reject');
+                                                setApprovalError(null);
                                                 setLoading(true);
                                                 try {
                                                     const res = await fetch('/api/resume', {
@@ -929,6 +971,9 @@
                                                         // See the identical comment on the Approve handler above.
                                                         const data = await res.json();
                                                         setMessages(prev => [...prev, { role: 'assistant', content: data.response, agent: data.active_agent }]);
+                                                    } else {
+                                                        const err = await res.json().catch(() => ({}));
+                                                        setApprovalError(err.detail || `Rejection failed (HTTP ${res.status}).`);
                                                     }
                                                 } finally {
                                                     setLoading(false);
@@ -1202,6 +1247,73 @@
                 try {
                     return JSON.parse(localStorage.getItem(STUDIO_LAYOUT_PREFIX + projectName) || '{}');
                 } catch (e) {
+                    return {};
+                }
+            };
+            const saveStoredLayout = (projectName, layoutById) => {
+                if (!projectName) return;
+                try {
+                    localStorage.setItem(STUDIO_LAYOUT_PREFIX + projectName, JSON.stringify(layoutById));
+                } catch (e) {
+                    console.error('Failed to save Studio layout', e);
+                }
+            };
+            // Computes a top-down layered layout for the swarm graph via dagre (loaded from CDN
+            // as window.dagre — see the <script> tag in <head>), keyed by node id. Used two ways:
+            // as the *default* position for any node fetchConfig doesn't already have a dragged/
+            // stored position for (replacing the old fixed row-of-agents formula, which had no
+            // sense of the actual handoff/delegation graph shape), and by the "Auto Layout" button
+            // to explicitly recompute every node's position on demand. Never called on its own to
+            // overwrite a position the user already dragged — see fetchConfig's merge order below.
+            // Returns {} (letting each node's own formulaic position stand) if the dagre script
+            // failed to load — e.g. offline dev — rather than breaking the graph render entirely.
+            const computeDagreLayout = (layoutNodes, layoutEdges) => {
+                if (!window.dagre || layoutNodes.length === 0) return {};
+                try {
+                    const nodeIds = new Set(layoutNodes.map((n) => n.id));
+                    const isAgentNode = (id) => id !== 'user' && !id.startsWith('tool-');
+                    // A layered layout only ranks nodes reachable via edges — an agent with
+                    // nothing pointing at it (no handoff/delegation target, e.g. a router- or
+                    // auto_route-driven swarm that never declares one, or an agent simply not
+                    // wired to anything yet) would otherwise land in the same rank as the User
+                    // node itself, since "no incoming edges" looks identical to "the root" to
+                    // dagre. A synthetic user -> agent edge (layout-only, never rendered) floors
+                    // every agent at rank >= 1 so the graph always reads "User, then agents"
+                    // regardless of how sparsely the real edges connect them.
+                    const agentsTargetedByRealEdge = new Set(
+                        layoutEdges.filter((e) => isAgentNode(e.target)).map((e) => e.target)
+                    );
+                    const augmentedEdges = [...layoutEdges];
+                    if (nodeIds.has('user')) {
+                        layoutNodes.forEach((n) => {
+                            if (isAgentNode(n.id) && !agentsTargetedByRealEdge.has(n.id)) {
+                                augmentedEdges.push({ source: 'user', target: n.id });
+                            }
+                        });
+                    }
+
+                    const g = new window.dagre.graphlib.Graph();
+                    g.setGraph({ rankdir: 'TB', nodesep: 50, ranksep: 90 });
+                    g.setDefaultEdgeLabel(() => ({}));
+                    layoutNodes.forEach((n) => {
+                        g.setNode(n.id, { width: n.style?.width || 240, height: 64 });
+                    });
+                    augmentedEdges.forEach((e) => {
+                        if (nodeIds.has(e.source) && nodeIds.has(e.target)) {
+                            g.setEdge(e.source, e.target);
+                        }
+                    });
+                    window.dagre.layout(g);
+                    const positions = {};
+                    layoutNodes.forEach((n) => {
+                        const dagreNode = g.node(n.id);
+                        if (!dagreNode) return;
+                        const width = n.style?.width || 240;
+                        positions[n.id] = { x: dagreNode.x - width / 2, y: dagreNode.y - 32 };
+                    });
+                    return positions;
+                } catch (e) {
+                    console.error('dagre layout failed', e);
                     return {};
                 }
             };
@@ -1553,6 +1665,27 @@
                 fetchConfig(); // Refresh to restore the deleted node in the UI
             }, []);
 
+            // Explicit, user-triggered reset to a clean dagre layout — the only thing allowed to
+            // overwrite a position the user already dragged (fetchConfig's own poll never does,
+            // per onNodeDragStop/storedLayout above). Not memoized: it's a plain button click
+            // handler, not a ReactFlow prop, so there's no re-subscription cost to recreating it
+            // each render with fresh `nodes`/`edges` closures.
+            const handleAutoLayout = () => {
+                const positions = computeDagreLayout(nodes, edges);
+                if (Object.keys(positions).length === 0) return;
+                setNodes((currentNodes) => currentNodes.map((n) => (
+                    positions[n.id] ? { ...n, position: positions[n.id] } : n
+                )));
+                const projectName = configNameRef.current;
+                if (projectName) {
+                    const layoutById = {};
+                    nodes.forEach((n) => {
+                        layoutById[n.id] = positions[n.id] || n.position;
+                    });
+                    saveStoredLayout(projectName, layoutById);
+                }
+            };
+
             // Fires once when a drag gesture ends (not on every intermediate frame — dragging a
             // node fires many onNodesChange position events, and writing to localStorage on each
             // one would be both wasteful and janky). Reads the current stored map fresh from
@@ -1561,14 +1694,9 @@
             const onNodeDragStop = useCallback((event, node) => {
                 const projectName = configNameRef.current;
                 if (!projectName) return;
-                try {
-                    const key = STUDIO_LAYOUT_PREFIX + projectName;
-                    const stored = loadStoredLayout(projectName);
-                    stored[node.id] = node.position;
-                    localStorage.setItem(key, JSON.stringify(stored));
-                } catch (e) {
-                    console.error('Failed to save Studio layout position', e);
-                }
+                const stored = loadStoredLayout(projectName);
+                stored[node.id] = node.position;
+                saveStoredLayout(projectName, stored);
             }, []);
 
             const onConnect = useCallback(async (params) => {
@@ -1612,15 +1740,53 @@
                     let newNodes = [];
                     let newEdges = [];
 
-                    const createHtmlLabel = (icon, title, subtitle) => `
+                    const createHtmlLabel = (icon, title, subtitle, badges = '') => `
                         <div class="flex items-center gap-3 w-full overflow-hidden">
                             <div class="flex-shrink-0 w-8 h-8 rounded-md bg-white/5 flex items-center justify-center text-lg">${icon}</div>
                             <div class="flex flex-col text-left min-w-0 flex-1">
                                 <span class="text-sm font-medium text-neutral-100 truncate w-full" title="${title}">${title}</span>
-                                ${subtitle ? `<span class="text-xs text-neutral-400 truncate w-full">${subtitle}</span>` : ''}
+                                ${subtitle ? `<span class="text-xs text-neutral-400 truncate w-full flex items-center gap-1">${subtitle}${badges}</span>` : ''}
                             </div>
                         </div>
                     `;
+
+                    // Distinguishes a tool node's icon/subtitle by its actual kind instead of the
+                    // single generic wrench + "Tool / MCP" label every tool got before, regardless
+                    // of whether it was a local Python function, an MCP server, an OpenAPI wrapper,
+                    // or a sandboxed code executor — all already present in /api/config's payload
+                    // (config/schema.py's ToolConfig union), just not surfaced visually. A bare
+                    // ToolReferenceConfig (a per-agent tools: entry that's just a name, referencing
+                    // a root-level tool) carries no type/module of its own, so it's resolved via
+                    // rootToolsByName instead.
+                    const TOOL_TYPE_META = {
+                        local: { icon: '🔧', label: 'Local Tool' },
+                        mcp: { icon: '🔌', label: 'MCP Server' },
+                        openapi: { icon: '🌐', label: 'OpenAPI' },
+                        sandbox: { icon: '📦', label: 'Sandbox' },
+                        unknown: { icon: '🔗', label: 'Tool' },
+                    };
+                    const rootToolsByName = new Map((data.tools || []).map((rt) => [rt.name, rt]));
+                    const resolveToolType = (t) => {
+                        if (t.type === 'mcp' || t.type === 'openapi' || t.type === 'sandbox') return t.type;
+                        if (t.module) return 'local';
+                        const rootTool = rootToolsByName.get(t.name);
+                        if (rootTool) {
+                            return (rootTool.type === 'mcp' || rootTool.type === 'openapi' || rootTool.type === 'sandbox')
+                                ? rootTool.type
+                                : 'local';
+                        }
+                        return 'unknown';
+                    };
+                    // requires_approval/untrusted_output live on every concrete ToolConfig variant
+                    // but not on a bare ToolReferenceConfig — fall back to the resolved root tool
+                    // for those flags the same way resolveToolType does for the icon.
+                    const buildToolBadges = (t) => {
+                        const flagSource = t.requires_approval !== undefined ? t : (rootToolsByName.get(t.name) || {});
+                        let badges = '';
+                        if (flagSource.requires_approval) badges += `<span title="Requires human approval" class="text-amber-400">🔒</span>`;
+                        if (flagSource.untrusted_output) badges += `<span title="Untrusted output" class="text-red-400">⚠️</span>`;
+                        return badges;
+                    };
 
                     // Node chrome is inline styles (ReactFlow reads style objects directly, not
                     // Tailwind classes) so it can't ride the CSS-variable retrofit — pick the
@@ -1696,15 +1862,32 @@
                                 });
                             }
 
+                            // Delegation spawns an isolated child engine that hands its result
+                            // back — a different relationship than a handoff's outright transfer
+                            // of control — drawn dashed violet instead of solid indigo so the two
+                            // are visually distinct rather than indistinguishable arrows.
+                            if (agentData.delegations) {
+                                agentData.delegations.forEach(delegate => {
+                                    newEdges.push({
+                                        id: `e-deleg-${agentName}-${delegate}`,
+                                        source: agentName,
+                                        target: delegate,
+                                        markerEnd: { type: MarkerType.ArrowClosed, color: '#a855f7' },
+                                        style: { stroke: '#a855f7', strokeWidth: 2, strokeDasharray: '6,3' }
+                                    });
+                                });
+                            }
+
                             if (agentData.tools) {
                                 agentData.tools.forEach((t, tIdx) => {
                                     const toolId = `tool-${agentName}-${t.name}`;
+                                    const toolMeta = TOOL_TYPE_META[resolveToolType(t)];
                                     newNodes.push({
                                         id: toolId,
                                         type: 'default',
                                         sourcePosition: 'bottom',
                                         targetPosition: 'top',
-                                        data: { label: <div dangerouslySetInnerHTML={{ __html: createHtmlLabel('🔧', formatTitle(t.name), 'Tool / MCP') }} /> },
+                                        data: { label: <div dangerouslySetInnerHTML={{ __html: createHtmlLabel(toolMeta.icon, formatTitle(t.name), toolMeta.label, buildToolBadges(t)) }} /> },
                                         // Same width as the agent box (240) — tIdx 0 sits flush under its
                                         // parent instead of shifted +10px right, and only tools after the
                                         // first cascade further right/down for the stacked-card look.
@@ -1730,13 +1913,19 @@
                     // the freshest source within this page session; storedLayout (localStorage)
                     // second, so a position survives a browser refresh too, when prevNodes is
                     // still the empty initial state and has nothing to offer. Only brand-new node
-                    // ids (a newly added agent/tool, present in neither) get the computed default.
+                    // ids (a newly added agent/tool, present in neither) fall through to a
+                    // computed default — dagre's layered layout when available, the row/cascade
+                    // formula already baked into newNodes otherwise (e.g. the dagre CDN script
+                    // failed to load).
                     const storedLayout = loadStoredLayout(data.name);
+                    const dagrePositions = computeDagreLayout(newNodes, newEdges);
                     setNodes((prevNodes) => {
                         const prevPositionById = new Map(prevNodes.map((n) => [n.id, n.position]));
                         return newNodes.map((n) => {
-                            const prevPosition = prevPositionById.get(n.id) || storedLayout[n.id];
-                            return prevPosition ? { ...n, position: prevPosition } : n;
+                            const knownPosition = prevPositionById.get(n.id) || storedLayout[n.id];
+                            if (knownPosition) return { ...n, position: knownPosition };
+                            const dagrePosition = dagrePositions[n.id];
+                            return dagrePosition ? { ...n, position: dagrePosition } : n;
                         });
                     });
                     setEdges(newEdges);
@@ -1862,9 +2051,19 @@
                     {mainTab === 'dashboard' ? (
                         <div className="flex flex-1 overflow-hidden relative">
                             <div className={`${isRightPaneOpen ? 'w-[55%]' : 'w-full'} relative flex flex-col bg-background border-r border-border transition-all duration-300`}>
-                                <div className="absolute top-4 left-4 z-10 flex items-center gap-2 bg-surface/80 backdrop-blur px-3 py-1.5 rounded-md border border-border shadow-sm">
-                                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-                                    <span className="text-xs font-medium text-neutral-300">Live Architecture</span>
+                                <div className="absolute top-4 left-4 z-10 flex items-center gap-2">
+                                    <div className="flex items-center gap-2 bg-surface/80 backdrop-blur px-3 py-1.5 rounded-md border border-border shadow-sm">
+                                        <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                                        <span className="text-xs font-medium text-neutral-300">Live Architecture</span>
+                                    </div>
+                                    <button
+                                        onClick={handleAutoLayout}
+                                        className="flex items-center gap-1.5 bg-surface/80 hover:bg-surface backdrop-blur px-3 py-1.5 rounded-md border border-border shadow-sm text-xs font-medium text-neutral-300 hover:text-neutral-100 transition-colors"
+                                        title="Recompute a clean layout from the current handoff/delegation/tool graph — overwrites any positions you've dragged"
+                                    >
+                                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h10M4 18h16" /></svg>
+                                        Auto Layout
+                                    </button>
                                 </div>
 
                                 <button

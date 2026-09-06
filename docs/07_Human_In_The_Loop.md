@@ -143,3 +143,68 @@ instead of `required_approvers` — any 2 distinct approvers (from `server.auth.
 single `approver_env_var` approver counted as id `"default"`) satisfy it. `required_approvers`
 takes precedence when both are set. Neither field changes anything for tools that don't set
 them — `required_approvals` defaults to `1`, exactly today's single-approval behavior.
+
+## 8. DB-Backed Approver Credentials
+
+`approver_env_var`/`approvers` are fine for local development, but a real deployment usually wants
+to issue and revoke reviewer credentials without editing `ai.yaml`/`.env` and restarting the
+process — and without a plaintext secret sitting in the environment. `runtime/approvers.py` stores
+credentials **hashed and salted** (stdlib `hashlib.scrypt`) in the project's own database (the same
+sqlite/postgres store `checkpoints`/`run_logs` already use — no separate service to run).
+
+Manage them via the CLI:
+```bash
+inta approvers add finance      # issues a new secret, printed exactly once
+inta approvers rotate finance   # same id, fresh secret — invalidates the old one immediately
+inta approvers revoke finance   # can no longer approve via /resume; kept for audit history
+inta approvers list             # ids + issued/revoked status only, never secrets
+```
+
+Or over HTTP, for a consumer's own admin site/tooling. This is a **separate, more privileged
+credential tier** from both the requester's own session auth and any individual approver's own
+`X-Approver-Key` — set `server.auth.admin_env_var` to enable it (unset means these three endpoints
+are disabled outright, `503`, not open):
+```yaml
+server:
+  auth:
+    type: api_key
+    env_var: INTAGRIN_API_KEY          # requester auth
+    admin_env_var: INTAGRIN_ADMIN_KEY  # required to manage approvers below
+```
+```
+POST   /approvers              {"approver_id": "finance"}   -> {"approver_id", "secret"}  (once)
+GET    /approvers                                            -> {"approvers": [...]}
+DELETE /approvers/{approver_id}
+```
+all three require `Authorization: Bearer <INTAGRIN_ADMIN_KEY value>`.
+
+Whichever way a credential is issued, it's used identically at resume time — as the
+`X-Approver-Key` header described in sections 4 and 7 above. DB-backed and env-var-configured
+approvers can be mixed freely in the same project; `identify_approver` checks the database first,
+then falls back to `approver_env_var`/`approvers`.
+
+## 9. Discovering Paused Sessions Programmatically
+
+Sections 4-8 assume something (a frontend, a Slack bot) already knows *which* session is paused
+and calls `/resume` on it. `GET /pending-approvals` answers the other question — "which sessions
+are paused right now?" — without pulling every session's full transcript via `GET /sessions`:
+
+```
+GET /pending-approvals
+```
+```json
+[
+  {
+    "session_id": "session_456",
+    "pending": {"tool": "post_to_twitter", "agent": "publisher", "status": "awaiting_approval"},
+    "queued_count": 0
+  }
+]
+```
+
+`queued_count` is how many more approvals are queued up behind this one for the same session (see
+section 5 on one-time exemptions — a session can have more than one call paused at once).
+Authenticated and tenant-scoped exactly like `/sessions` — a caller only ever sees its own tenant's
+paused sessions. Built for a poller that needs to check many sessions (or, for a team running
+several separately-deployed IntaGrin projects, many *projects*) at once without the cost of
+fetching full session state for each one.

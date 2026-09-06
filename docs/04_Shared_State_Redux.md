@@ -20,12 +20,18 @@ If you specify `state_schema` in your `ai.yaml`:
 state_schema: "schemas.UserState"
 ```
 
-The engine will take the entire Shared State, JSON dump it, and automatically inject it into the active agent's system prompt at every single turn. 
+The engine will JSON dump the fields your `state_schema` actually declares, and automatically
+inject them into the active agent's system prompt at every single turn:
 
 ```text
 [SHARED TYPED STATE]:
 {"invoice_id": "12345", "user_balance": -50.00}
 ```
+
+This is filtered to your schema's own declared fields, not the full raw state dict — internal
+engine bookkeeping (`_circuit_breakers`, `_router_trace`, `_dynamic_agents`, ...) and
+`long_term_memory` (already injected in its own `[LONG TERM MEMORY]` block) are never included, so
+the block doesn't grow with router/delegation activity a developer's own schema never asked for.
 
 If `state_schema` is set, every `write_state` call is also validated against that Pydantic model
 before it's committed — a write that violates the schema is rejected and the error is returned to

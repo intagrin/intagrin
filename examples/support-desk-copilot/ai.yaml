@@ -1,0 +1,184 @@
+version: "1.0"
+name: "SupportDeskCopilot"
+description: >
+  An enterprise support desk copilot: triages incoming tickets, resolves known issues straight
+  from a knowledge base, runs isolated diagnostics on technical problems, handles billing and
+  refunds with human oversight on high-value actions, and fast-tracks enterprise-tier accounts to
+  a concierge lane that can spin up a narrowly-scoped specialist for a genuinely novel incident.
+
+state_schema: "schemas.TicketState"
+max_session_budget_usd: 2.00
+
+model:
+  primary: "gemini/gemini-3.5-flash-lite"
+  fallback: "gemini/gemini-3.5-flash"
+  temperature: 0.3
+  guardrails:
+    mask_pii: true
+    system_safeguards: true
+    banned_words: ["ignore previous instructions"]
+
+memory:
+  type: "sqlite"
+  db_path: ".ai/memory.db"
+  # Recurring issues on an account should be remembered across sessions, not just within one chat.
+  # A real multi-tenant deployment should pair this with server.auth.type: custom for genuine
+  # per-tenant isolation (see docs/08_Security_and_Reliability.md's Tenant Isolation section) —
+  # this demo intentionally uses api_key auth, so shared/episodic memory lives in the single
+  # global_tenant namespace, which is fine for a single-account demo but not for production
+  # multi-tenant use.
+  shared_scope: "tenant"
+
+rag:
+  docs_dir: "kb"
+  top_k: 4
+  # Both rag and episodic_memory default embedding_model to OpenAI's text-embedding-3-small
+  # regardless of model.primary's provider — left at that default here, every remember_episode/
+  # recall_episodes/search_knowledge_base call would need OPENAI_API_KEY too, on top of the
+  # GEMINI_API_KEY this project's chat model already needs. Pin both to a Gemini embedding model
+  # so the whole project only ever needs one provider key.
+  embedding_model: "gemini/gemini-embedding-001"
+
+episodic_memory:
+  scope: "tenant"
+  default_limit: 5
+  embedding_model: "gemini/gemini-embedding-001"
+
+condition_functions:
+  - name: "is_enterprise_tier"
+    module: "tools.conditions"
+
+reducers:
+  - key: "escalation_notes"
+    strategy: "append"
+
+circuit_breakers:
+  max_handoffs_per_session: 12
+  max_delegation_turns: 10
+  max_parallel_fan_out: 4
+  max_usd_cost_per_session: 2.00
+
+telemetry:
+  - "otel"
+
+server:
+  auth:
+    type: "api_key"
+    env_var: "SUPPORT_DESK_API_KEY"
+    approver_env_var: "SUPPORT_DESK_APPROVER_KEY"
+
+skills:
+  - name: "known_issues_runbook"
+    description: "Step-by-step investigation order for technical issues: reproduce, check platform status, diagnose in the sandbox, record notes, never auto-close on unverified output."
+    path: "skills/known_issues_runbook.md"
+
+tools:
+  - name: "lookup_customer_account"
+    module: "tools.support_tools"
+  - name: "check_service_status"
+    module: "tools.support_tools"
+
+default_agent: "triage_agent"
+
+agents:
+  triage_agent:
+    description: "First point of contact. Classifies incoming tickets, answers known questions from the knowledge base, and routes billing/technical issues to the right specialist."
+    system_prompt_file: "prompts/triage_agent.jinja2"
+    lazy_load_tools: true
+    routers:
+      - condition: "is_enterprise_tier(customer_tier)"
+        target: "priority_support_agent"
+    handoffs:
+      - "billing_agent"
+      - "technical_agent"
+    tools:
+      - name: "lookup_customer_account"
+      - name: "auto_close_resolved_ticket"
+        module: "tools.support_tools"
+        available_when: "not _untrusted_content_ingested"
+
+  technical_agent:
+    description: "Diagnoses technical issues: checks platform service health, runs isolated diagnostics on customer-provided logs, and follows the known-issues runbook."
+    system_prompt_file: "prompts/technical_agent.jinja2"
+    lazy_load_tools: true
+    handoffs:
+      - "triage_agent"
+      - "billing_agent"
+    delegations:
+      - "service_status_checker"
+    skills: ["known_issues_runbook"]
+    tools:
+      - name: "check_service_status"
+      - name: "run_diagnostic_script"
+        type: "sandbox"
+        language: "python"
+        timeout_seconds: 15
+        requires_approval: true
+
+  billing_agent:
+    description: "Handles invoice questions and refunds. Refunds over $500 automatically pause for human sign-off."
+    system_prompt_file: "prompts/billing_agent.jinja2"
+    lazy_load_tools: true
+    handoffs:
+      - "triage_agent"
+      - "technical_agent"
+    tools:
+      - name: "lookup_invoice"
+        module: "tools.support_tools"
+      - name: "issue_refund"
+        module: "tools.support_tools"
+
+  priority_support_agent:
+    description: "Enterprise/enterprise_plus fast lane. Handles routine requests directly and spawns a narrowly-scoped specialist for genuinely novel account-specific incidents."
+    system_prompt_file: "prompts/priority_support_agent.jinja2"
+    lazy_load_tools: true
+    handoffs:
+      - "technical_agent"
+      - "billing_agent"
+    tools:
+      - name: "lookup_customer_account"
+      - name: "check_service_status"
+    spawns:
+      tool_pool:
+        - "lookup_customer_account"
+        - "check_service_status"
+      result_schema: "schemas.IncidentResolution"
+      requires_approval_on_first_action: false
+      max_creations_per_session: 5
+      on_complete:
+        - key: "escalation_notes"
+          value: "Enterprise incident specialist completed a deep-dive investigation."
+
+  service_status_checker:
+    description: "Single-purpose worker: checks the status of exactly one platform service. Only reachable via technical_agent's delegate_to_many, never a direct handoff target."
+    system_prompt_file: "prompts/service_status_checker.jinja2"
+    tools:
+      - name: "check_service_status"
+
+workflows:
+  nightly_root_cause_review:
+    - name: "recall_recent_incidents"
+      type: "sequential"
+      agent: "technical_agent"
+      instruction: >
+        Call recall_episodes(event_type="failure_pattern") to review unresolved technical
+        failure patterns recorded over the last day. Summarize the single most severe recurring
+        pattern (or state clearly if there are none) and write it with
+        write_state("todays_review_subject", "<summary>").
+    - name: "root_cause_debate"
+      type: "vote"
+      vote:
+        strategy: "llm_judge"
+        debate_rounds: 2
+      tasks:
+        - name: "infra_hypothesis"
+          agent: "technical_agent"
+          instruction: >
+            Read today's review subject via read_state and propose the most likely root cause
+            assuming it's an infrastructure/platform-side issue. Propose a concrete fix.
+        - name: "client_hypothesis"
+          agent: "technical_agent"
+          instruction: >
+            Read today's review subject via read_state and propose the most likely root cause
+            assuming it's a client-side/configuration issue rather than a platform failure.
+            Propose a concrete fix.

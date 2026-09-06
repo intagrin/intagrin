@@ -76,14 +76,14 @@ def fetch_trending_ai_topics(domain: Literal["ai", "cloud", "cybersecurity", "so
         domain: Target tech domain to explore ('ai', 'cloud', 'cybersecurity', 'software_engineering', 'general_tech').
     """
     domain_query_map = {
-        "ai": "Artificial Intelligence LLM AI agents breakthroughs",
-        "cloud": "Cloud computing Kubernetes serverless infrastructure",
-        "cybersecurity": "Cybersecurity zero trust security vulnerabilities AI",
-        "software_engineering": "Software engineering developer tools architecture",
+        "ai": "Artificial Intelligence LLM AI agents breakthroughs benchmarks",
+        "cloud": "Cloud computing Kubernetes serverless infrastructure security",
+        "cybersecurity": "Cybersecurity zero trust security vulnerabilities AI threat intelligence",
+        "software_engineering": "Software engineering developer tools architecture CI CD",
         "general_tech": "Emerging enterprise technology trends innovation"
     }
     
-    query = domain_query_map.get(domain, "Artificial Intelligence latest news")
+    query = domain_query_map.get(domain, "Artificial Intelligence latest breakthroughs")
     return search_web_for_topic(query=query, max_results=6)
 
 

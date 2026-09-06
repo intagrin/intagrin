@@ -59,9 +59,11 @@ agents:
   triage:
     system_prompt_file: "prompts/triage_prompt.jinja2"
     handoffs: ["support", "billing"]
-    routers:
-      - condition: "user_status == 'banned'"
-        target: "billing"
+    # Deterministic routers bypass the LLM entirely when their condition is already true —
+    # e.g. once some earlier turn's tool call has written state via write_state():
+    #   routers:
+    #     - condition: "user_status == 'banned'"
+    #       target: "billing"
 
   support:
     system_prompt_file: "prompts/support_prompt.jinja2"
@@ -69,20 +71,22 @@ agents:
     tools:
       - name: "get_user_account"
         module: "tools.custom_tools"
-      - name: "mcp_github"
-        type: "mcp"
-        command: "npx"
-        args: ["-y", "@modelcontextprotocol/server-github"]
-        requires_approval: true
+      # MCP servers plug in the same way as a local tool — e.g. GitHub (needs Node's `npx` on
+      # PATH and a GITHUB_PERSONAL_ACCESS_TOKEN in .env; not required for this starter project):
+      #   - name: "mcp_github"
+      #     type: "mcp"
+      #     command: "npx"
+      #     args: ["-y", "@modelcontextprotocol/server-github"]
+      #     requires_approval: true
 
   billing:
     system_prompt_file: "prompts/billing_prompt.jinja2"
 
 workflows:
   daily_audit:
-    - name: "audit_github"
+    - name: "check_account"
       agent: "support"
-      instruction: "Use your github tool to check the latest issues."
+      instruction: "Look up the account for user_id '123' and report its status."
     - name: "report_billing"
       agent: "billing"
       instruction: "Summarize the findings and wait."
@@ -96,16 +100,18 @@ Reading it top to bottom:
   automatically gives the `triage` agent a `transfer_agent` tool that can only target `support` or
   `billing` — the model decides *when*, you constrain *where*. See
   [Routing & Handoffs](./03_Agent_Handoffs_and_Routing) for the full mechanism.
-- **`triage.routers`** — a *deterministic* alternative to the line above: if `condition` evaluates
-  true against the shared state, the transfer happens instantly with **zero LLM calls**, before the
-  model ever sees a prompt. As scaffolded, this specific router won't actually fire — nothing in
-  this starter project ever calls `write_state("user_status", "banned")`, so the condition always
-  evaluates against a state that doesn't have that key yet (harmless: it's just skipped, not an
-  error). That's intentional as a teaching point, not a bug to work around: routers only ever see
-  what your agents have explicitly written with `write_state`. Have `triage` (or a tool) call
-  `write_state("user_status", ...)` once you have a real source for it, and the router starts
-  firing for free. Conditions are bare state keys, not Python expressions — `user_status == 'banned'`
-  works, `state.get('user_status') == 'banned'` does not (see
+- **The commented-out `routers` block** — a *deterministic* alternative to a handoff: if
+  `condition` evaluates true against the shared state, the transfer happens instantly with **zero
+  LLM calls**, before the model ever sees a prompt. It ships commented out, on purpose, rather
+  than as a live router that can never fire: nothing in this starter project calls
+  `write_state("user_status", "banned")`, so an uncommented version of this router would sit dead
+  from turn one — evaluated every turn, never firing, and not erroring either (routers fail silently
+  open when the state they check doesn't exist yet). Uncomment it once `triage` (or a tool) actually
+  calls `write_state("user_status", ...)`, and run `inta why user_status` any time to check who
+  currently reads or (best-effort) writes a key before you rely on it — this is exactly the gotcha
+  that command exists to catch instead of leaving you to discover it by watching a handoff not
+  happen. Conditions are bare state keys, not Python expressions — `user_status == 'banned'` works,
+  `state.get('user_status') == 'banned'` does not (see
   [Routing & Handoffs](./03_Agent_Handoffs_and_Routing) for exactly what the condition grammar
   supports).
 - **`support.delegations: ["billing"]`** — a second, different control-flow mechanism. Where a
@@ -114,19 +120,49 @@ Reading it top to bottom:
   to `triage`'s `handoffs: ["billing"]` — same target agent, two different relationships.
 - **`support.tools`** — one local Python tool (`get_user_account`, implemented in
   `tools/custom_tools.py` — open it, it's a few lines with a docstring the framework turns into a
-  JSON schema automatically) and one Model Context Protocol server (`mcp_github`) that IntaGrin
-  spins up as a subprocess and talks to over JSON-RPC — no hand-written wrapper code either way.
-  `mcp_github` is also flagged `requires_approval: true`, so any call to it pauses for a human to
-  approve before it actually runs.
+  JSON schema automatically), plus a commented-out example of wiring in a Model Context Protocol
+  server (`mcp_github`) the same way — IntaGrin spins it up as a subprocess and talks to it over
+  JSON-RPC, no hand-written wrapper code either way. It ships commented out because it needs
+  Node's `npx` on `PATH` and a `GITHUB_PERSONAL_ACCESS_TOKEN`, neither of which this starter
+  project requires; `inta doctor` checks that any MCP command you do uncomment is actually on
+  `PATH` before you find out the hard way at runtime. Uncommented, it'd also carry
+  `requires_approval: true`, pausing any call for a human to approve before it actually runs.
 - **`workflows.daily_audit`** — a third shape entirely: an *autonomous* pipeline, not a chat. No
   human types anything; `inta run daily_audit` drives `support` then `billing` through fixed
   instructions in sequence.
 
-That's three distinct ways agents hand off control in one 30-line file — conversational (`handoffs`),
+That's three distinct ways agents hand off control in one file — conversational (`handoffs`),
 sub-task (`delegations`), and scripted (`workflows`) — because real systems need all three, not just
 one.
 
+Don't want to re-read `ai.yaml` line-by-line every time, or need to hand this system to someone
+who won't? `inta explain` prints exactly this kind of walkthrough automatically — agent roles,
+tools, handoffs/delegations/routers, and the safety limits — built from the parsed config plus
+each `description:` field, in plain English:
+
+```bash
+inta explain
+```
+
+It only has a name to go on for any agent (or the app itself) missing a `description:` —
+`inta doctor` (below) flags those gaps so `inta explain`'s output doesn't stay full of blanks.
+
 ## 3. Run it
+
+Before your first real run, `inta doctor` checks the environment for you in one pass instead of
+one `inta dev` crash at a time — that an API key is set for `model.primary`, that `state_schema`
+actually loads, that any MCP command you've wired in is on `PATH`, and that the app and every
+agent has a `description:` set (a warning, not a failure — `inta explain` above is what actually
+consumes it):
+
+```bash
+inta doctor
+```
+
+Haven't filled in an API key yet and just want to see the loop work first? Set `model.primary`
+(or an agent's `model_override`) to `"mock/echo"` in `ai.yaml` — it replies with a canned,
+clearly-labeled message and costs nothing, no network call made, so `inta doctor` reports it as
+needing no key at all. Swap in a real model string once you're ready.
 
 ```bash
 inta dev
@@ -141,7 +177,16 @@ You: I need help with my account, user 123
 `triage` should call `transfer_agent` to hand you to `support`, which can then call
 `get_user_account("123")` to answer you. Ask about billing instead and you'll land on `billing`
 directly. Every turn — the handoff decision, the tool call, the final answer — prints to your
-terminal as it happens; nothing here is a black box.
+terminal as it happens; nothing here is a black box. If a router along the way evaluates but
+doesn't fire (see the commented-out one above), that shows up inline too, right when it happens,
+not just later in `inta replay`.
+
+For a single non-interactive message instead of the chat loop — useful for scripting, or quick
+iteration on a prompt edit — use `--once`:
+
+```bash
+inta dev --once "I need help with my account, user 123"
+```
 
 ## 4. Where to go next
 

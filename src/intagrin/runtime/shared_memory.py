@@ -14,9 +14,14 @@ oversight.
 import sqlite3
 from pathlib import Path
 
+from ..errors import IntaGrinError
 from ..tracing.console import Tracer
-from .memory import postgres_connect
+from .memory import pooled_postgres_connection
 from .run_logger import _resolve_postgres_url
+
+# See run_logger.py's identical _NO_DRIVER_ERRORS for why both are caught: pooled_postgres_connection
+# raises IntaGrinError, not ImportError, when neither psycopg driver is installed.
+_NO_DRIVER_ERRORS = (ImportError, IntaGrinError)
 
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS shared_memory (
@@ -49,13 +54,12 @@ def ensure_schema(mem_cfg, project_dir: Path) -> None:
         if not conn_url:
             return
         try:
-            conn = postgres_connect(conn_url)
-        except ImportError:
+            with pooled_postgres_connection(conn_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_POSTGRES_SCHEMA)
+                conn.commit()
+        except _NO_DRIVER_ERRORS:
             return
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(_POSTGRES_SCHEMA)
-            conn.commit()
 
 
 def load_shared_memory(mem_cfg, project_dir: Path, scope_key: str) -> str | None:
@@ -77,8 +81,7 @@ def load_shared_memory(mem_cfg, project_dir: Path, scope_key: str) -> str | None
         conn_url = _resolve_postgres_url(mem_cfg)
         if not conn_url:
             return None
-        conn = postgres_connect(conn_url)
-        with conn, conn.cursor() as cur:
+        with pooled_postgres_connection(conn_url) as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT content FROM shared_memory WHERE scope_key = %s", (scope_key,)
             )
@@ -113,8 +116,7 @@ def save_shared_memory(mem_cfg, project_dir: Path, scope_key: str, content: str)
         conn_url = _resolve_postgres_url(mem_cfg)
         if not conn_url:
             return
-        conn = postgres_connect(conn_url)
-        with conn:
+        with pooled_postgres_connection(conn_url) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO shared_memory (scope_key, content, updated_at) "

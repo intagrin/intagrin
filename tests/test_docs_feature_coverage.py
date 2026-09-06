@@ -44,6 +44,8 @@ FEATURE_MARKERS = {
     "_generate_and_validate_wizard_config": "schema-validated, self-healing inta new --withagent generation",
     "_untrusted_content_ingested": "the lethal-trifecta guardrail — tools[].untrusted_output tracking (config/schema.py, engine.py's execute_tool)",
     "runtime/sandbox.py": "isolated subprocess execution for agent-generated code (tools[].type: \"sandbox\", SandboxToolConfig)",
+    "load_skill": "the Agent Skills primitive — progressive-disclosure instruction bundles (ai.yaml skills:, engine.py's load_skill/read_skill_resource)",
+    "server/a2a.py": "the A2A (Agent2Agent) protocol surface for external agent interop — GET /.well-known/agent-card.json + POST /a2a JSON-RPC (message/send, message/stream, tasks/get)",
 }
 
 

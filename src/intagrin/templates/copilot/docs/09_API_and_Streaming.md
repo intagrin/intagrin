@@ -62,6 +62,12 @@ Executes the reviewed tool call once after approval, then continues the agent an
 }
 ```
 
+`GET /pending-approvals`
+A narrow, poll-friendly view of which sessions are currently paused on a human approval — every
+session with a non-empty `_pending_approval`/`_pending_approval_queue`, without the cost of
+fetching each one's full transcript via `GET /sessions`. Tenant-scoped like every other endpoint
+here. See `docs/07_Human_In_The_Loop.md` section 9 for the response shape and a worked example.
+
 ## Per-Caller Rate Limiting
 
 By default there's no limit on how much one authenticated caller (tenant) can call `/chat`,
@@ -103,6 +109,11 @@ runs, searchable by session id/endpoint/status/error). Since the Agent Playgroun
 `/api/chat`/`/api/stream`/`/api/resume` proxy directly to these same endpoints, Playground-driven
 runs show up here too — one place to see everything that actually hit the engine, however it was
 triggered.
+
+`GET /api/logs` also accepts an optional `since_id` query parameter — return only rows with `id`
+greater than the given value, instead of always the latest 200. Lets an external poller (a fleet
+dashboard aggregating logs across several separately-deployed projects, say) fetch only what's new
+since its last check rather than re-fetching and re-filtering the same page every time.
 
 **An unhandled mid-turn exception is also written into the conversation itself**, not just this
 audit table — a normal tool-execution error (a rate limit, a bad argument) is already caught

@@ -26,6 +26,17 @@ before assuming a given config is fully bounded.
 If an LLM hallucinates bad python code, the tool will throw an error. IntaGrin contains an advanced `_compress_error_loops` garbage collector. If an agent fails 3 times in a row with the exact same error, IntaGrin deletes the redundant history and injects a hard system boundary into the prompt:
 *"YOU ARE STUCK IN A LOOP. Formulate a completely different approach."*
 
+When `episodic_memory:` is configured, the same trigger also records the failure pattern (tool
+name + exact error text) as a `remember_episode` entry (`event_type="failure_pattern"`, tagged
+`["reflexion", <tool name>]`) — a Reflexion-style connector between two features that already
+existed separately. Without it, this loop-breaker only ever helped the *one* session it fired in;
+the next session (or a different user hitting the same broken call) got no benefit from what was
+already learned. The system boundary message itself now points the model at
+`recall_episodes(event_type='failure_pattern')` so it can check for a prior encounter before
+retrying. No extra LLM call is spent generating the reflection — the raw failure pattern is
+itself a concrete, matchable fact, and this fires on a synchronous hot path called every
+turn-loop iteration.
+
 ## 3. Tenant Isolation (Anti-IDOR)
 If you deploy IntaGrin behind a SaaS frontend, you must prevent User A from resuming User B's paused agent session. 
 When custom authentication returns a stable tenant ID, the HTTP chat, streaming, resume, session-listing, monitor, and voice endpoints namespace their checkpoint IDs with that ID. Use custom authentication for multi-tenant deployments; `none` and `api_key` modes intentionally use the shared `global_tenant` namespace. Custom checkpointers remain responsible for applying the same isolation rule.
@@ -68,7 +79,32 @@ telemetry:
   - "otel"
   - "langfuse"
 ```
-The engine will automatically emit W3C OpenTelemetry spans for every LLM interaction (model, tokens, latency, cost) to your APM of choice, via LiteLLM's own instrumentation. Note this currently covers LLM calls specifically — agent-orchestration events (handoffs, tool calls, router decisions) aren't yet emitted as correlated OTel spans; for those, use `inta monitor`'s live SSE dashboard or `inta replay`'s post-hoc session view.
+Setting `telemetry: ["otel"]` turns on two independent, additive things:
+
+1. **LiteLLM's own instrumentation** — W3C OpenTelemetry spans for every LLM interaction (model,
+   tokens, latency, cost) to your APM of choice.
+2. **IntaGrin's own GenAI-semconv spans** (`tracing/otel_exporter.py`) — tool calls, router
+   decisions (fired or not, including a condition that raised), handoffs, agent spawns/retirement,
+   and MCP background-task lifecycle events, each mapped onto the [OpenTelemetry GenAI semantic
+   conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) (`gen_ai.system`,
+   `gen_ai.request.model`, `gen_ai.usage.input_tokens`/`output_tokens`) where a standard attribute
+   exists, and vendor-namespaced `intagrin.*` attributes for everything else. These are exported as
+   a *separate* span tree from LiteLLM's own spans — not merged into one hierarchy — correlated
+   only via shared `intagrin.session_id`/service-name attributes, not a single trace.
+
+   The exported `service.name` defaults to your project's own `ai.yaml` `name` (not a hardcoded
+   `"intagrin"`), so several separately-deployed projects sharing one OTLP backend still show up
+   as distinct services rather than one indistinguishable blob — useful the moment you're
+   correlating traces across more than one deployment.
+
+Both default to printing spans to the console (via the core `opentelemetry-sdk` dependency, no
+extra install needed). Set the standard `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable to
+export real OTLP instead — this single variable controls both exporters at once. Real OTLP export
+requires the optional `intagrin[otel]` extra (`pip install "intagrin[otel]"`); setting the endpoint
+without it raises `IG-RT-009` rather than silently falling back to console output.
+
+`inta monitor`'s live SSE dashboard and `inta replay`'s post-hoc session view remain available
+independent of `telemetry:` — they don't require OTel at all.
 
 ## 8. Lethal-Trifecta Guardrail (Untrusted Content Tracking)
 The riskiest shape a prompt-injection attack takes isn't the injection itself — it's the combination of *untrusted content* + *access to private data/state* + *a way to exfiltrate it*, sometimes called the "lethal trifecta." IntaGrin can't detect injection itself, but it tracks provenance so you can structurally break that combination:
@@ -88,4 +124,4 @@ tools:
 The moment any tool call flagged `untrusted_output: true` succeeds (RAG's `search_knowledge_base`, and MCP/OpenAPI/sandbox tools by default), `state["_untrusted_content_ingested"]` is set for the rest of the session — sticky, never reset, since the content stays in conversation history regardless. Any `available_when` or `routers[].condition` can reference that bare state key directly, no extra config needed. `inta verify` advises (never fails) when an agent has both an untrusted-output tool and a separate `requires_approval` tool that doesn't reference the key.
 
 ## 9. Sandboxed Code Execution
-`type: "sandbox"` tools (see [03_Tools_and_Actions.md](./03_Tools_and_Actions.md#running-agent-generated-code-type-sandbox)) run agent-generated code in an isolated subprocess with a wall-clock timeout, POSIX CPU/memory limits, and a secret-free environment — reducing blast radius for a buggy or runaway script. Read that as exactly what it is: process and resource isolation, not a filesystem or network security boundary. For genuinely untrusted code, combine `requires_approval: true` with the lethal-trifecta guardrail above, or swap in a real container/microVM-based executor for stronger isolation.
+`type: "sandbox"` tools (see [03_Tools_and_Actions.md](./03_Tools_and_Actions.md#running-agent-generated-code-type-sandbox)) default to `backend: "local"`: agent-generated code in an isolated subprocess with a wall-clock timeout, POSIX CPU/memory limits, and a secret-free environment — reducing blast radius for a buggy or runaway script. Read that as exactly what it is: process and resource isolation, not a filesystem or network security boundary. For genuinely untrusted code, combine `requires_approval: true` with the lethal-trifecta guardrail above, or set `backend: "e2b"` to run it in a real Firecracker microVM instead, with genuine filesystem/network isolation (see 03_Tools_and_Actions.md's "Real isolation via E2B" section).

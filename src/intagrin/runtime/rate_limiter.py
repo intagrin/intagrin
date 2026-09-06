@@ -13,7 +13,7 @@ from pathlib import Path
 
 from ..errors import IntaGrinError
 from ..tracing.console import Tracer
-from .memory import postgres_connect
+from .memory import pooled_postgres_connection
 from .run_logger import _resolve_postgres_url, ensure_schema
 
 
@@ -30,8 +30,7 @@ def _count_since(mem_cfg, project_dir: Path, prefix: str, since: datetime) -> in
     conn_url = _resolve_postgres_url(mem_cfg)
     if not conn_url:
         return 0
-    conn = postgres_connect(conn_url)
-    with conn:
+    with pooled_postgres_connection(conn_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT COUNT(*) FROM run_logs WHERE session_id LIKE %s AND created_at >= %s",
@@ -57,8 +56,7 @@ def _cost_and_tokens_since(
     conn_url = _resolve_postgres_url(mem_cfg)
     if not conn_url:
         return (0.0, 0)
-    conn = postgres_connect(conn_url)
-    with conn, conn.cursor() as cur:
+    with pooled_postgres_connection(conn_url) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT COALESCE(SUM(cost_delta), 0), COALESCE(SUM(tokens_delta), 0) "
             "FROM run_logs WHERE session_id LIKE %s AND created_at >= %s",
@@ -121,7 +119,13 @@ def check_rate_limit(mem_cfg, project_dir: Path, user_context: str, rate_cfg) ->
                     f"Rate limit exceeded: {tokens}/{rate_cfg.max_tokens_per_caller_per_day} "
                     "tokens used in the last 24h.",
                 )
-    except IntaGrinError:
-        raise
+    except IntaGrinError as e:
+        # Only an actual rate-limit breach (IG-RT-008, raised above) should reach the caller as
+        # a 429. Any other IntaGrinError here — e.g. IG-RT-004 from pooled_postgres_connection
+        # when neither psycopg driver is installed — is an infra problem, not a quota breach, and
+        # must fail open like any other Exception below, not get misreported as "rate limited."
+        if e.code == "IG-RT-008":
+            raise
+        Tracer.log_error(f"Rate Limit Check Error (failing open): {e}")
     except Exception as e:
         Tracer.log_error(f"Rate Limit Check Error (failing open): {e}")

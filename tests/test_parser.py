@@ -57,3 +57,49 @@ def test_missing_file(tmp_path: Path):
     with pytest.raises(ParserError) as exc:
         parse_project(tmp_path)
     assert "Missing configuration file" in str(exc.value)
+
+def test_parse_rejects_a_typo_d_agent_field_instead_of_silently_dropping_it(tmp_path: Path):
+    # `toolz` (typo of `tools`) must be a hard parse error, not a silently-ignored key that
+    # leaves the agent missing the tool with zero indication why.
+    ai_yaml = """version: "1.0"
+name: "test-app"
+model:
+  primary: "openai/gpt-4o-mini"
+memory:
+  type: "buffer"
+default_agent: "agent1"
+agents:
+  agent1:
+    toolz:
+      - name: "test_tool"
+        module: "tools.custom"
+"""
+    (tmp_path / "ai.yaml").write_text(ai_yaml)
+
+    with pytest.raises(ParserError) as exc:
+        parse_project(tmp_path)
+
+    err_str = str(exc.value)
+    assert "agents.agent1.toolz" in err_str
+    assert "Extra inputs are not permitted" in err_str
+
+def test_parse_rejects_an_unknown_top_level_key(tmp_path: Path):
+    ai_yaml = """version: "1.0"
+name: "test-app"
+model:
+  primary: "openai/gpt-4o-mini"
+memory:
+  type: "buffer"
+default_agent: "agent1"
+agents:
+  agent1: {}
+routing:
+  strategy: "round_robin"
+"""
+    (tmp_path / "ai.yaml").write_text(ai_yaml)
+
+    with pytest.raises(ParserError) as exc:
+        parse_project(tmp_path)
+
+    assert "routing" in str(exc.value)
+    assert "Extra inputs are not permitted" in str(exc.value)

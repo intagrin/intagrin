@@ -4,7 +4,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..compiler.parser import parse_project
-from .eval_runner import load_eval_cases, run_case
+from .eval_runner import compute_routing_accuracy, load_eval_cases, run_case
 
 console = Console()
 
@@ -26,8 +26,10 @@ async def run_evals(project_dir: Path):
     table.add_column("Expected Tool", style="magenta")
     table.add_column("Status", style="bold")
 
+    results = []
     for case in cases:
         result = await run_case(graph, project_dir, case)
+        results.append(result)
 
         if not result.deterministic_pass:
             status = f"[red]FAIL[/red] [dim]({'; '.join(result.reasons)})[/dim]"
@@ -68,3 +70,20 @@ async def run_evals(project_dir: Path):
         )
 
     console.print(table)
+
+    # Routing accuracy — the only place this number exists anywhere, and the prerequisite
+    # baseline before ever considering replacing auto_route's per-turn LLM routing call with a
+    # cheaper heuristic (see RoutingAccuracy's own docstring). Only printed when at least one
+    # case actually set expected_agent, so a project with no routing assertions yet doesn't see
+    # a confusing "0/0" line.
+    routing = compute_routing_accuracy(graph, cases, results)
+    if routing.total:
+        console.print(
+            f"\n[bold]Routing accuracy:[/bold] {routing.correct}/{routing.total} "
+            f"({routing.accuracy:.0%})"
+        )
+        if routing.semantic_total:
+            console.print(
+                f"[bold]  ↳ auto_route (semantic) subset:[/bold] {routing.semantic_correct}/"
+                f"{routing.semantic_total} ({routing.semantic_accuracy:.0%})"
+            )

@@ -1,3 +1,4 @@
+import contextlib
 import json
 import sqlite3
 import threading
@@ -108,7 +109,7 @@ def resolve_postgres_sqlalchemy_url(connection_url: str) -> str:
     "No module named 'psycopg2'" for any SQLAlchemy consumer (currently: Alembic's auto-migrate)
     even though PostgresCheckpointer itself works fine, since it tries psycopg3 directly. Rewrite
     to the explicit `postgresql+psycopg://` dialect when only psycopg3 is installed, mirroring the
-    same psycopg3-then-psycopg2 preference order as PostgresCheckpointer._init_pool."""
+    same psycopg3-then-psycopg2 preference order as `_get_or_create_pg_pool`."""
     if not connection_url.startswith(("postgresql://", "postgres://")):
         return connection_url
     try:
@@ -120,13 +121,15 @@ def resolve_postgres_sqlalchemy_url(connection_url: str) -> str:
 
 
 def postgres_connect(connection_url: str):
-    """Raw (non-pooled) Postgres connection for the small one-off queries outside
-    PostgresCheckpointer's pool (run_logger.py's per-request audit-log writes, monitor.py's Logs
-    page reads). Tries psycopg (v3) first, then psycopg2 — same preference order as
-    PostgresCheckpointer._init_pool — so callers work under either driver instead of hard-depending
-    on psycopg2 specifically, which this project's 'postgres' extra doesn't install. Returns a
-    connection usable as a context manager (`with postgres_connect(url) as conn:`) under both
-    drivers. Raises ImportError if neither is installed — callers already catch this."""
+    """Raw (non-pooled) Postgres connection — opens a brand-new connection each call, so prefer
+    `pooled_postgres_connection` above for anything called per-request (audit-log writes, rate
+    limit checks, approver lookups, ...); this remains for genuinely one-shot callers (a CLI
+    command that connects once and exits) where pooling buys nothing. Tries psycopg (v3) first,
+    then psycopg2 — same preference order as `_get_or_create_pg_pool` — so callers work under
+    either driver instead of hard-depending on psycopg2 specifically, which this project's
+    'postgres' extra doesn't install. Returns a connection usable as a context manager (`with
+    postgres_connect(url) as conn:`) under both drivers. Raises ImportError if neither is
+    installed — callers already catch this."""
     try:
         import psycopg
 
@@ -156,44 +159,72 @@ _pg_pools = {}
 _pg_pools_lock = threading.Lock()
 
 
+def _get_or_create_pg_pool(connection_url: str) -> tuple[Any, bool]:
+    """Process-wide connection pool per connection_url, shared by PostgresCheckpointer and every
+    one-off Postgres write (run_logger.py, rate_limiter.py, approvers.py, shared_memory.py,
+    episodic_memory.py, monitor.py's Logs page) via pooled_postgres_connection below — instead of
+    each of those opening (and tearing down) a brand-new raw connection per call, which adds a
+    real TCP+auth round-trip to every request and risks exhausting Postgres's max_connections
+    under bursty load. Locked so two RuntimeEngine instances constructed concurrently (e.g. two
+    simultaneous /chat requests for the same project) can't both miss the cache and each create
+    their own pool for the same connection_url."""
+    with _pg_pools_lock:
+        if connection_url in _pg_pools:
+            return _pg_pools[connection_url]
+
+        try:
+            import psycopg  # noqa: F401 -- probes for the psycopg3 extra being installed
+            from psycopg_pool import ConnectionPool
+
+            pool = ConnectionPool(connection_url, min_size=2, max_size=20)
+            use_psycopg3 = True
+        except ImportError:
+            try:
+                import psycopg2  # noqa: F401 -- probes for the psycopg2 fallback being installed
+                from psycopg2.pool import ThreadedConnectionPool
+
+                pool = ThreadedConnectionPool(2, 20, connection_url)
+                use_psycopg3 = False
+            except ImportError:
+                raise IntaGrinError(
+                    "IG-RT-004", "PostgreSQL requires 'psycopg[pool]' or 'psycopg2'."
+                )
+
+        _pg_pools[connection_url] = (pool, use_psycopg3)
+        return pool, use_psycopg3
+
+
+@contextlib.contextmanager
+def pooled_postgres_connection(connection_url: str):
+    """Borrows a connection from the shared pool for `connection_url` instead of opening a new
+    one — a drop-in replacement for `with postgres_connect(url) as conn:` at any one-off call
+    site (schema-ensure, a single insert/update/select). Works under either driver: a psycopg3
+    pool's own `.connection()` already commits/rolls back and returns the connection on exit; a
+    psycopg2 pool needs an explicit getconn()/putconn() pair, mirrored here. Callers keep calling
+    `conn.commit()` explicitly exactly as they already do with postgres_connect — a redundant
+    extra commit on the psycopg3 path is harmless."""
+    pool, use_psycopg3 = _get_or_create_pg_pool(connection_url)
+    if use_psycopg3:
+        with pool.connection() as conn:
+            yield conn
+    else:
+        conn = pool.getconn()
+        try:
+            yield conn
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            pool.putconn(conn)
+
+
 class PostgresCheckpointer:
     """Enterprise PostgreSQL session checkpointer using connection pooling."""
 
     def __init__(self, connection_url: str):
         self.connection_url = connection_url
-        self.use_psycopg3 = False
-        self.pool = None
-        self._init_pool()
+        self.pool, self.use_psycopg3 = _get_or_create_pg_pool(connection_url)
         self._init_db()
-
-    def _init_pool(self):
-        # Locked so two RuntimeEngine instances constructed concurrently (e.g. two
-        # simultaneous /chat requests for the same project) can't both miss the cache and
-        # each create their own pool for the same connection_url.
-        with _pg_pools_lock:
-            if self.connection_url in _pg_pools:
-                self.pool, self.use_psycopg3 = _pg_pools[self.connection_url]
-                return
-
-            try:
-                import psycopg  # noqa: F401 -- probes for the psycopg3 extra being installed
-                from psycopg_pool import ConnectionPool
-
-                self.pool = ConnectionPool(self.connection_url, min_size=2, max_size=20)
-                self.use_psycopg3 = True
-            except ImportError:
-                try:
-                    import psycopg2  # noqa: F401 -- probes for the psycopg2 fallback being installed
-                    from psycopg2.pool import ThreadedConnectionPool
-
-                    self.pool = ThreadedConnectionPool(2, 20, self.connection_url)
-                    self.use_psycopg3 = False
-                except ImportError:
-                    raise IntaGrinError(
-                        "IG-RT-004", "PostgreSQL requires 'psycopg[pool]' or 'psycopg2'."
-                    )
-
-            _pg_pools[self.connection_url] = (self.pool, self.use_psycopg3)
 
     def _execute(
         self,
