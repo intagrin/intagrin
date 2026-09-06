@@ -182,3 +182,29 @@ Whichever way a credential is issued, it's used identically at resume time — a
 `X-Approver-Key` header described in sections 4 and 7 above. DB-backed and env-var-configured
 approvers can be mixed freely in the same project; `identify_approver` checks the database first,
 then falls back to `approver_env_var`/`approvers`.
+
+## 9. Discovering Paused Sessions Programmatically
+
+Sections 4-8 assume something (a frontend, a Slack bot) already knows *which* session is paused
+and calls `/resume` on it. `GET /pending-approvals` answers the other question — "which sessions
+are paused right now?" — without pulling every session's full transcript via `GET /sessions`:
+
+```
+GET /pending-approvals
+```
+```json
+[
+  {
+    "session_id": "session_456",
+    "pending": {"tool": "post_to_twitter", "agent": "publisher", "status": "awaiting_approval"},
+    "queued_count": 0
+  }
+]
+```
+
+`queued_count` is how many more approvals are queued up behind this one for the same session (see
+section 5 on one-time exemptions — a session can have more than one call paused at once).
+Authenticated and tenant-scoped exactly like `/sessions` — a caller only ever sees its own tenant's
+paused sessions. Built for a poller that needs to check many sessions (or, for a team running
+several separately-deployed IntaGrin projects, many *projects*) at once without the cost of
+fetching full session state for each one.

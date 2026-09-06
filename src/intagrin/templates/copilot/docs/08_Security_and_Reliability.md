@@ -92,6 +92,11 @@ Setting `telemetry: ["otel"]` turns on two independent, additive things:
    a *separate* span tree from LiteLLM's own spans — not merged into one hierarchy — correlated
    only via shared `intagrin.session_id`/service-name attributes, not a single trace.
 
+   The exported `service.name` defaults to your project's own `ai.yaml` `name` (not a hardcoded
+   `"intagrin"`), so several separately-deployed projects sharing one OTLP backend still show up
+   as distinct services rather than one indistinguishable blob — useful the moment you're
+   correlating traces across more than one deployment.
+
 Both default to printing spans to the console (via the core `opentelemetry-sdk` dependency, no
 extra install needed). Set the standard `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable to
 export real OTLP instead — this single variable controls both exporters at once. Real OTLP export
