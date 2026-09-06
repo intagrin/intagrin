@@ -1,5 +1,5 @@
 <p align="center">
-    <img src="https://raw.githubusercontent.com/intagrin/intagrin/main/docs/assets/logo3.png" alt="IntaGrin Logo" width="200"/>
+    <img src="https://raw.githubusercontent.com/intagrin/intagrin/main/docs/assets/logo-badge.png" alt="IntaGrin Logo" width="200"/>
 </p>
 
 <p align="center">
