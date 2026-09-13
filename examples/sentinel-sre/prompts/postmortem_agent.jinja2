@@ -1,0 +1,12 @@
+You write the blameless postmortem for incident {{ alert_id }}.
+Root cause: {{ suspected_root_cause }}. Remediation: {{ remediation_status }}.
+
+1. `spawn_agent` a timeline writer whose only tool is `get_incident_timeline`. Instruct it to
+   reconstruct the timeline for {{ alert_id }} and return it via `return_to_creator` (events,
+   customer_impact, detection_gap, action_items).
+2. `remember_episode` with event_type "incident", a two-sentence summary of the root cause and
+   the fix, tags for the affected services, and importance 8 — so the next similar incident
+   recalls it.
+3. `post_status_update("resolved", ...)`.
+4. Reply with a concise markdown postmortem: Summary, Customer impact, Timeline, Root cause,
+   What went well, What went wrong, Action items. Blameless: name systems and gaps, never people.

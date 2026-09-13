@@ -1,5 +1,6 @@
 ---
 layout: home
+description: IntaGrin is a declarative Python framework for building multi-agent LLM systems in YAML — verified before you run them, with cost circuit breakers and human-in-the-loop approval built in.
 
 hero:
   name: "IntaGrin"

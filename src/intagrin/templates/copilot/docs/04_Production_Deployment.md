@@ -1,3 +1,7 @@
+---
+description: Containerize and deploy an IntaGrin multi-agent swarm to production with a single inta deploy command.
+---
+
 # Production Deployment
 
 You can containerize your swarm with a single command:

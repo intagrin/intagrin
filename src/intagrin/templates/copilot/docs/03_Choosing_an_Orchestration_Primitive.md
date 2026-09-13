@@ -1,3 +1,7 @@
+---
+description: A decision guide for handoffs, delegations, routers, auto_route, spawns, and workflows — the six ways to move control between agents in ai.yaml.
+---
+
 # Choosing an Orchestration Primitive
 
 Six things move control between agents in `ai.yaml`: `handoffs`, `delegations`, `routers`,

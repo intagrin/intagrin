@@ -348,6 +348,26 @@ class RuntimeEngine:
         if "_untrusted_content_ingested" not in self.state:
             self.state["_untrusted_content_ingested"] = False
 
+        # Seed state_schema's own defaults for declared keys not yet present, so a fresh session
+        # starts in the schema's valid shape: a condition naming a declared-but-unwritten key
+        # evaluates against its default instead of raising "Unknown variable", and an `append`
+        # reducer extends the declared [] instead of replacing it with a bare scalar. Undeclared
+        # keys stay absent, so a typo'd name in a condition still surfaces. A resumed session's
+        # saved values win — initialize() merges the checkpoint over these via state.update().
+        if self.graph.config.state_schema:
+            import sys
+
+            from .schema_loader import load_model
+
+            if str(self.project_dir) not in sys.path:
+                sys.path.insert(0, str(self.project_dir))
+            try:
+                defaults = load_model(self.graph.config.state_schema)().model_dump()
+            except Exception:
+                defaults = {}  # required fields or a misconfigured path: nothing safe to seed
+            for key, value in defaults.items():
+                self.state.setdefault(key, value)
+
     @property
     def active_agent_name(self) -> str:
         return self.state.get("_active_agent_name", self.graph.config.default_agent)
@@ -937,6 +957,11 @@ class RuntimeEngine:
         defense-in-depth already applied to tool_pool and every other schema-driven gate here."""
         tool_cfg = next((t for t in agent_cfg.tools if t.name == tool_name), None)
         condition = getattr(tool_cfg, "available_when", None) if tool_cfg else None
+        if not condition and isinstance(tool_cfg, ToolReferenceConfig):
+            # A name-only reference inherits the root-level tool's own gate — otherwise an
+            # available_when declared at the root silently never applies to any agent.
+            root_cfg = next((t for t in self.graph.config.tools if t.name == tool_name), None)
+            condition = getattr(root_cfg, "available_when", None)
         if not condition:
             return True
         try:

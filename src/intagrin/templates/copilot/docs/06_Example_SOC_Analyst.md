@@ -1,3 +1,7 @@
+---
+description: A blueprint for a cybersecurity SOC analyst swarm in IntaGrin — alert triage, sandbox forensics, human-approved containment, and reporting.
+---
+
 # Example: Cybersecurity SOC Analyst
 
 IntaGrin is built for high-stakes enterprise workflows. Here's a multi-agent SOC swarm:

@@ -23,10 +23,21 @@ COPILOT_TEMPLATE_PATH = (
     REPO_ROOT / "src" / "intagrin" / "templates" / "copilot" / "reference_config.md"
 )
 
+# VitePress SEO frontmatter for the docs-site page only — render() stays pure markdown because
+# server/monitor.py's lookup_config_reference Architect tool returns it verbatim to a chat, and
+# the copilot template is an IDE-agent reference file, not a site page. Kept here rather than in
+# the page (which this script overwrites wholesale) so regenerating can't silently drop it.
+FRONTMATTER = (
+    "---\n"
+    "description: Every field IntaGrin recognizes in ai.yaml, generated directly from the "
+    "framework's Pydantic configuration schema.\n"
+    "---\n\n"
+)
+
 
 def main() -> None:
     content = render()
-    DOCS_PATH.write_text(content, encoding="utf-8")
+    DOCS_PATH.write_text(FRONTMATTER + content, encoding="utf-8")
     COPILOT_TEMPLATE_PATH.write_text(content, encoding="utf-8")
     print(f"Wrote {DOCS_PATH.relative_to(REPO_ROOT)}")
     print(f"Wrote {COPILOT_TEMPLATE_PATH.relative_to(REPO_ROOT)}")

@@ -904,6 +904,175 @@ def test_verifier_does_not_advise_when_lazy_load_tools_is_set():
         assert "lazy_load_tools not set" not in output
 
 
+_BUDGET_YAML = """version: "1.0"
+name: "budget-app"
+default_agent: "triage"
+model:
+  primary: "gemini/gemini-2.5-flash"
+memory:
+  type: "sqlite"
+{budget}agents:
+  triage: {{}}
+"""
+
+
+def test_verifier_reports_an_enforced_hard_ceiling_from_circuit_breakers():
+    """The static token table is a floor. circuit_breakers.max_usd_cost_per_session is the only
+    number actually enforced at runtime, and inta verify previously never mentioned it at all —
+    leaving 'what is the worst case this can cost me' unanswerable from the report."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(
+            _BUDGET_YAML.format(budget="circuit_breakers:\n  max_usd_cost_per_session: 1.50\n")
+        )
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "Hard ceiling" in output
+        assert "$1.50" in output
+        assert "circuit_breakers.max_usd_cost_per_session" in output
+        assert "No hard cost ceiling configured" not in output
+
+
+def test_verifier_reports_the_root_level_budget_as_the_ceiling_when_it_is_the_only_one_set():
+    """max_session_budget_usd is the older spelling and is equally enforced (the runtime reads
+    `cb.max_usd_cost_per_session or cfg.max_session_budget_usd`) — a project using only it must
+    still get a Hard ceiling line, naming the field it actually set."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(
+            _BUDGET_YAML.format(budget="max_session_budget_usd: 2.25\n")
+        )
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "Hard ceiling" in output
+        assert "$2.25" in output
+        assert "max_session_budget_usd" in output
+
+
+def test_verifier_warns_when_no_cost_ceiling_is_configured_at_all():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(_BUDGET_YAML.format(budget=""))
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "No hard cost ceiling configured" in output
+        assert "Hard ceiling:" not in output
+
+
+def test_verifier_flags_two_disagreeing_cost_ceilings():
+    """Both fields set to different values: the circuit_breakers one silently wins and the root
+    one is dead configuration. Same failure shape as required_approvals/required_approvers."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(
+            _BUDGET_YAML.format(
+                budget="max_session_budget_usd: 5.00\ncircuit_breakers:\n  max_usd_cost_per_session: 1.00\n"
+            )
+        )
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "Two different session cost ceilings" in output
+        assert "$1.00" in output
+        assert "$5.00" in output
+        # The effective ceiling is still reported, and it's the circuit_breakers one.
+        assert "Hard ceiling" in output
+
+
+def test_verifier_does_not_flag_two_agreeing_cost_ceilings():
+    """Both set to the same number — the project gets the ceiling it asked for either way, so
+    there's nothing surprising to warn about."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(
+            _BUDGET_YAML.format(
+                budget="max_session_budget_usd: 3.00\ncircuit_breakers:\n  max_usd_cost_per_session: 3.00\n"
+            )
+        )
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "Two different session cost ceilings" not in output
+        assert "Hard ceiling" in output
+
+
+_DELEGATION_PRIVILEGE_YAML = """version: "1.0"
+name: "deleg-priv-app"
+default_agent: "triage"
+model:
+  primary: "gemini/gemini-2.5-flash"
+memory:
+  type: "sqlite"
+{breakers}agents:
+  triage:
+    delegations: ["refunds"]
+    tools:
+      - name: "lookup_order"
+        module: "tools.custom"
+  refunds:
+    tools:
+      - name: "lookup_order"
+        module: "tools.custom"
+      - name: "issue_refund"
+        module: "tools.custom"
+"""
+
+
+def test_verifier_advises_when_a_delegation_edge_escalates_privilege():
+    """A delegated child runs as a full agent with its own tools:, so triage delegating to refunds
+    reaches issue_refund without holding it. Allowed by default, but it must be visible."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(_DELEGATION_PRIVILEGE_YAML.format(breakers=""))
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "Delegation grants tools the caller doesn't hold" in output
+        assert "triage" in output
+        assert "issue_refund" in output
+
+
+def test_verifier_confirms_delegation_privilege_when_the_strict_flag_is_on():
+    """With the flag on, an escalating config wouldn't have parsed at all — so reaching the
+    verifier means the subset guarantee holds, and it's reported as a resolved check."""
+    yaml_text = _DELEGATION_PRIVILEGE_YAML.format(
+        breakers="circuit_breakers:\n  strict_delegation_privilege: true\n"
+    ).replace('      - name: "issue_refund"\n        module: "tools.custom"\n', "")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        p_dir = Path(tmpdir)
+        (p_dir / "ai.yaml").write_text(yaml_text)
+        verifier = GraphVerifier(project_dir=p_dir)
+
+        with verifier_console.capture() as capture:
+            verifier.verify()
+        output = capture.get()
+
+        assert "Delegation privilege" in output
+        assert "Delegation grants tools the caller doesn't hold" not in output
+
+
 def test_verifier_does_not_advise_below_the_five_tool_threshold():
     """ToolRunner.get_active_tools is a no-op at 5 tools or fewer even with lazy_load_tools set —
     the nudge must match that exact threshold, not flag agents it wouldn't actually help."""

@@ -1,3 +1,7 @@
+---
+description: How IntaGrin's deterministic state-machine handoff model moves control between agents via LLM-driven handoffs and conditional routers.
+---
+
 # Routing & Handoffs
 
 Unlike traditional group chat frameworks where agents debate endlessly, IntaGrin uses a deterministic state-machine handoff model. There is only ever one active agent. When that agent is done, it hands off the user to the next agent.

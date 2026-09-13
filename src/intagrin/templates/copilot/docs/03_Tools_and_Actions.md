@@ -1,3 +1,7 @@
+---
+description: Write IntaGrin tools as plain Python functions with type hints and docstrings — automatically parsed into JSON schemas for LLM tool-calling.
+---
+
 # Custom Tools & Actions
 
 In IntaGrin, tools are just standard Python functions. 

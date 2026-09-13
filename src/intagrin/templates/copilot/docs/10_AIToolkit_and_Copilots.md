@@ -1,3 +1,7 @@
+---
+description: Use inta copilot to generate IDE rule/skill files that teach Cursor, GitHub Copilot, or Claude Code the IntaGrin framework's conventions.
+---
+
 # AI Toolkit & Copilots
 
 IntaGrin is designed to pair well with your IDE's AI agents — `inta copilot` generates rule/skill

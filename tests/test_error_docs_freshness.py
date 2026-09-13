@@ -12,19 +12,24 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _load_render():
+def _load_script():
     spec = importlib.util.spec_from_file_location(
         "generate_error_docs", REPO_ROOT / "scripts" / "generate_error_docs.py"
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules["generate_error_docs"] = module
     spec.loader.exec_module(module)
-    return module.render
+    return module
+
+
+def _load_render():
+    return _load_script().render
 
 
 def test_docs_page_matches_registry_render():
-    render = _load_render()
-    expected = render()
+    module = _load_script()
+    # The docs-site page carries SEO frontmatter the copilot template doesn't.
+    expected = module.FRONTMATTER + module.render()
     actual = (REPO_ROOT / "docs" / "12_Error_Reference.md").read_text(encoding="utf-8")
     assert actual == expected, (
         "docs/12_Error_Reference.md is stale — run "

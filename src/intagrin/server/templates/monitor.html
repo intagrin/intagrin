@@ -1640,7 +1640,7 @@
 
             const onEdgesDelete = useCallback(async (edgesToDelete) => {
                 for (const edge of edgesToDelete) {
-                    if (edge.source === 'user' || edge.source.startsWith('tool-') || edge.target.startsWith('tool-')) continue;
+                    if (edge.source === 'user' || edge.source.startsWith('tool-') || edge.target.startsWith('tool-') || edge.id.startsWith('e-router-')) continue;
                     try {
                         const res = await fetch('/api/graph/sync', {
                             method: 'POST',
@@ -1874,6 +1874,28 @@
                                         target: delegate,
                                         markerEnd: { type: MarkerType.ArrowClosed, color: '#a855f7' },
                                         style: { stroke: '#a855f7', strokeWidth: 2, strokeDasharray: '6,3' }
+                                    });
+                                });
+                            }
+
+                            // A router transfers control exactly like a handoff at runtime (inta
+                            // verify cycle-checks it as one), but code decides, not the model —
+                            // without this, an agent whose only exit is a router looked orphaned.
+                            // Drawn dotted amber and labelled with its condition so it reads as a
+                            // rule. Not deletable here: onEdgesDelete only knows how to remove
+                            // handoffs from ai.yaml, and a router must be edited in ai.yaml itself.
+                            if (agentData.routers) {
+                                agentData.routers.forEach((router, rIdx) => {
+                                    newEdges.push({
+                                        id: `e-router-${agentName}-${router.target}-${rIdx}`,
+                                        source: agentName,
+                                        target: router.target,
+                                        deletable: false,
+                                        label: router.condition || router.custom_module || 'router',
+                                        labelStyle: { fill: '#f59e0b', fontSize: 11, fontFamily: 'monospace' },
+                                        labelBgStyle: { fill: surfaceColor, fillOpacity: 0.9 },
+                                        markerEnd: { type: MarkerType.ArrowClosed, color: '#f59e0b' },
+                                        style: { stroke: '#f59e0b', strokeWidth: 2, strokeDasharray: '2,4' }
                                     });
                                 });
                             }

@@ -1,3 +1,7 @@
+---
+description: IntaGrin's Redux-style typed shared state — a global, Postgres/SQLite-persisted state dictionary agents read and write instead of passing raw text.
+---
+
 # Shared Typed State (Redux for AI)
 
 In multi-agent systems, agents need a way to communicate and share data. Instead of passing massive strings of text back and forth, IntaGrin implements a centralized, typed state-machine—much like Redux does for React frontends.

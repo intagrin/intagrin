@@ -1,0 +1,25 @@
+evaluations:
+  - name: "triage_fetches_the_alert_first"
+    agent: "triage_agent"
+    input: "Alert ALRT-7731 just fired. Triage it."
+    expected_tool: "get_alert"
+
+  - name: "sev1_is_routed_to_the_incident_commander"
+    agent: "triage_agent"
+    input: "Alert ALRT-7731 just fired. Triage it."
+    expected_agent: "incident_commander"
+
+  - name: "noise_alert_stays_with_triage"
+    agent: "triage_agent"
+    input: "Alert ALRT-7740 fired. Triage it."
+    expected_agent: "triage_agent"
+
+  - name: "investigator_checks_deploy_history"
+    agent: "service_investigator"
+    input: "Investigate checkout-api for alert ALRT-7731."
+    expected_tool: "changelog_list_deploys"
+
+  - name: "remediation_follows_the_rollback_runbook"
+    agent: "remediation_agent"
+    input: "Root cause: checkout-api v2.14.0 shrank the DB pool from 50 to 5. Last good version v2.13.4. Remediate."
+    expected_tool: "load_skill"

@@ -1,3 +1,7 @@
+---
+description: IntaGrin's production FastAPI backend — REST endpoints and Server-Sent Events (SSE) streaming for React, Vue, and Next.js frontends.
+---
+
 # REST API & SSE Streaming
 
 When you run `inta serve`, IntaGrin spins up a production-ready FastAPI backend designed specifically for React, Vue, and Next.js consumption.

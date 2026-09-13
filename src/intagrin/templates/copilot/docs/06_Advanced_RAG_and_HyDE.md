@@ -1,3 +1,7 @@
+---
+description: IntaGrin's zero-dependency vector RAG engine — chunk, embed, and search your own documents in-process with no external vector database.
+---
+
 # Advanced RAG & HyDE
 
 IntaGrin includes a zero-dependency Vector RAG engine: no external vector database required. It

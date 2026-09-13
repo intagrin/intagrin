@@ -27,7 +27,9 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
+    # No "License :: OSI Approved :: ..." classifier here on purpose: PEP 639 replaced it with
+    # the `license = "Apache-2.0"` expression above, and setuptools>=78 errors out if both are
+    # present — which broke `pip install .`, `uv build`/`uv run`, and tests/test_packaging.py.
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

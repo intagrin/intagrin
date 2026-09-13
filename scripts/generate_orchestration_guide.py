@@ -23,9 +23,20 @@ from intagrin.config.orchestration_guide import GUIDE
 
 DOCS_PATH = REPO_ROOT / "docs" / "03_Choosing_an_Orchestration_Primitive.md"
 
+# VitePress SEO frontmatter for the docs-site page only — GUIDE itself stays pure markdown
+# because cli.py's `compile` and run_architect splice it straight into a system prompt, where
+# YAML frontmatter would be noise. Kept here rather than in the page (which this script
+# overwrites wholesale) so regenerating can't silently drop it.
+FRONTMATTER = (
+    "---\n"
+    "description: A decision guide for handoffs, delegations, routers, auto_route, spawns, and "
+    "workflows — the six ways to move control between agents in ai.yaml.\n"
+    "---\n\n"
+)
+
 
 def main() -> None:
-    DOCS_PATH.write_text(GUIDE, encoding="utf-8")
+    DOCS_PATH.write_text(FRONTMATTER + GUIDE, encoding="utf-8")
     print(f"Wrote {DOCS_PATH.relative_to(REPO_ROOT)}")
 
 

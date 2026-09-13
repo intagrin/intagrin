@@ -1,3 +1,7 @@
+---
+description: How inta serve exposes every IntaGrin app as an A2A (Agent2Agent) protocol agent, interoperable with LangGraph, Google ADK, and AutoGen.
+---
+
 # A2A (Agent2Agent) Interoperability
 
 `inta serve` exposes every IntaGrin app as an [A2A](https://a2a-protocol.org/) agent, no `ai.yaml`

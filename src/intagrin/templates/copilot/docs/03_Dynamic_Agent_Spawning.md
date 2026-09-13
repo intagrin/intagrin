@@ -1,3 +1,7 @@
+---
+description: How spawns lets an agent create a brand-new agent at runtime — a new system prompt, tool subset, and model — while a session is running.
+---
+
 # Dynamic Runtime Agent Creation
 
 Every mechanism in [Routing & Handoffs](./03_Agent_Handoffs_and_Routing) — `handoffs`,

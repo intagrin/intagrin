@@ -1043,7 +1043,16 @@ class CircuitBreakersConfig(StrictBaseModel):
         default=3, description="Max sequential tool failures before halting"
     )
     max_usd_cost_per_session: float | None = Field(
-        default=None, description="Max USD cost per session before halting"
+        default=None,
+        description=(
+            "Max USD cost per session before halting — a real enforced ceiling, not an estimate: "
+            "the engine sums litellm.completion_cost into state['_metrics']['total_cost'] (a "
+            "delegated child's spend is merged into its parent's total too) and aborts the "
+            "session once this is reached. Takes precedence over the root-level "
+            "max_session_budget_usd, which means the same thing at a different nesting level; "
+            "prefer this one, and don't set both (inta verify warns if both are set and "
+            "disagree). None (default) means no cost ceiling at all."
+        ),
     )
     max_delegation_depth: int = Field(
         default=3,
@@ -1052,6 +1061,20 @@ class CircuitBreakersConfig(StrictBaseModel):
     max_delegation_turns: int = Field(
         default=15,
         description="Max turns a delegated sub-agent may take before it is forcefully aborted",
+    )
+    strict_delegation_privilege: bool = Field(
+        default=False,
+        description=(
+            "Reject at parse time any `delegations:` edge whose target agent holds a tool the "
+            "delegating agent doesn't — the delegation-path equivalent of the subset rule "
+            "spawns.tool_pool already enforces unconditionally. A delegated child runs as a full "
+            "agent with its own tools:, so without this a low-privilege agent can reach a "
+            "high-privilege one's tools just by delegating to it. Off by default because, unlike "
+            "spawning, delegating to a more capable specialist is often the whole point "
+            "(a triage agent handing off to a refunds agent); turn it on when delegation targets "
+            "are meant to be strictly narrower than their callers. inta verify reports which "
+            "edges escalate either way."
+        ),
     )
     max_parallel_fan_out: int = Field(
         default=10,
@@ -1136,7 +1159,15 @@ class AppConfig(StrictBaseModel):
         description="Global JSON schema module path for Typed Shared State",
     )
     max_session_budget_usd: float | None = Field(
-        default=None, description="Global hard cost ceiling per session"
+        default=None,
+        description=(
+            "Global hard cost ceiling per session — the older root-level spelling of "
+            "circuit_breakers.max_usd_cost_per_session. Both are enforced by the same runtime "
+            "check and mean exactly the same thing; the circuit_breakers one wins when both are "
+            "set, so setting both to different values leaves this one silently dead (inta verify "
+            "warns). Kept for existing configs; prefer circuit_breakers.max_usd_cost_per_session "
+            "in new ones."
+        ),
     )
     imports: list[ImportConfig] = Field(
         default_factory=list,
@@ -1223,6 +1254,39 @@ class AppConfig(StrictBaseModel):
                         f"agents.{agent_name}.skills references skill {name!r}, which isn't "
                         f"declared in the root-level skills: list. Declared skills: "
                         f"{sorted(known_skill_names)}."
+                    )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_delegation_tools_are_a_subset_of_the_delegating_agent(self) -> "AppConfig":
+        """The delegation-path counterpart to AgentConfig's
+        _validate_spawns_tool_pool_is_a_subset_of_own_tools. Lives here rather than on AgentConfig
+        because an agent can't see its siblings — resolving `delegations: [other]` into that
+        agent's tool list needs the whole agents dict.
+
+        Gated behind circuit_breakers.strict_delegation_privilege (default off) since delegating
+        to a deliberately more capable specialist is a legitimate, common shape; the flag is for
+        projects that want the spawn-path guarantee on this path too. A dangling delegation target
+        is ignored here — that's a separate concern, reported by inta verify.
+        """
+        if not self.circuit_breakers.strict_delegation_privilege:
+            return self
+        for parent_name, parent_cfg in self.agents.items():
+            if not parent_cfg.delegations:
+                continue
+            parent_tools = {t.name for t in parent_cfg.tools}
+            for target_name in parent_cfg.delegations:
+                target_cfg = self.agents.get(target_name)
+                if target_cfg is None:
+                    continue
+                escalated = sorted({t.name for t in target_cfg.tools} - parent_tools)
+                if escalated:
+                    raise ValueError(
+                        f"agents.{parent_name} delegates to {target_name!r}, which holds tool(s) "
+                        f"{parent_name} doesn't itself have: {escalated}. With "
+                        "circuit_breakers.strict_delegation_privilege on, a delegated sub-agent "
+                        "can only use capabilities its caller already holds. Either give "
+                        f"{parent_name} those tools, narrow {target_name}, or turn the flag off."
                     )
         return self
 

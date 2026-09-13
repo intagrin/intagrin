@@ -13,7 +13,7 @@ def _flatten_call_tool_result(result: types.CallToolResult) -> str:
     get_task_payload's polled-completion path, since both ultimately produce the same shape of
     result for a tool call (an immediate CallToolResult, or one fetched via tasks/result after a
     claimed call finishes). Non-text content parts are dropped, matching pre-existing behavior."""
-    if result.isError:
+    if result.is_error:
         return f"Error: {result.content}"
     output = [content.text for content in result.content if content.type == "text"]
     return "\n".join(output)

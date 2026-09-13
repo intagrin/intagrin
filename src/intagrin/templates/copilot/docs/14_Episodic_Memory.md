@@ -1,3 +1,7 @@
+---
+description: IntaGrin's episodic memory tier — discrete, structured, individually queryable agent experiences layered on top of working and long-term memory.
+---
+
 # Episodic Memory
 
 IntaGrin's memory system has three tiers already: working memory (checkpointed conversation

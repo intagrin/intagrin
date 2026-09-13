@@ -401,7 +401,7 @@
             }
           ],
           "default": null,
-          "description": "Max USD cost per session before halting",
+          "description": "Max USD cost per session before halting — a real enforced ceiling, not an estimate: the engine sums litellm.completion_cost into state['_metrics']['total_cost'] (a delegated child's spend is merged into its parent's total too) and aborts the session once this is reached. Takes precedence over the root-level max_session_budget_usd, which means the same thing at a different nesting level; prefer this one, and don't set both (inta verify warns if both are set and disagree). None (default) means no cost ceiling at all.",
           "title": "Max Usd Cost Per Session"
         },
         "max_delegation_depth": {
@@ -415,6 +415,12 @@
           "description": "Max turns a delegated sub-agent may take before it is forcefully aborted",
           "title": "Max Delegation Turns",
           "type": "integer"
+        },
+        "strict_delegation_privilege": {
+          "default": false,
+          "description": "Reject at parse time any `delegations:` edge whose target agent holds a tool the delegating agent doesn't — the delegation-path equivalent of the subset rule spawns.tool_pool already enforces unconditionally. A delegated child runs as a full agent with its own tools:, so without this a low-privilege agent can reach a high-privilege one's tools just by delegating to it. Off by default because, unlike spawning, delegating to a more capable specialist is often the whole point (a triage agent handing off to a refunds agent); turn it on when delegation targets are meant to be strictly narrower than their callers. inta verify reports which edges escalate either way.",
+          "title": "Strict Delegation Privilege",
+          "type": "boolean"
         },
         "max_parallel_fan_out": {
           "default": 10,
@@ -1723,7 +1729,7 @@
         }
       ],
       "default": null,
-      "description": "Global hard cost ceiling per session",
+      "description": "Global hard cost ceiling per session — the older root-level spelling of circuit_breakers.max_usd_cost_per_session. Both are enforced by the same runtime check and mean exactly the same thing; the circuit_breakers one wins when both are set, so setting both to different values leaves this one silently dead (inta verify warns). Kept for existing configs; prefer circuit_breakers.max_usd_cost_per_session in new ones.",
       "title": "Max Session Budget Usd"
     },
     "imports": {

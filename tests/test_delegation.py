@@ -2,6 +2,7 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from intagrin.config.schema import AgentConfig, AppConfig, MemoryConfig, ModelConfig
 from intagrin.runtime.engine import RuntimeEngine
@@ -77,3 +78,51 @@ def test_native_delegation(mock_graph_delegation):
             # which passes the dictionary reference.
             
     asyncio.run(_run())
+
+
+def _delegation_app(strict: bool, parent_tools: list, child_tools: list) -> AppConfig:
+    """A manager delegating to a worker, with each side's tools: controllable."""
+    return AppConfig(
+        version="1.0",
+        name="deleg_privilege_app",
+        default_agent="manager",
+        model=ModelConfig(primary="mock/model"),
+        memory=MemoryConfig(type="buffer"),
+        circuit_breakers={"strict_delegation_privilege": strict},
+        agents={
+            "manager": AgentConfig(delegations=["worker"], tools=parent_tools),
+            "worker": AgentConfig(tools=child_tools),
+        },
+    )
+
+
+_LOOKUP = {"name": "lookup_order", "module": "tools.custom"}
+_REFUND = {"name": "issue_refund", "module": "tools.custom"}
+
+
+def test_strict_delegation_privilege_rejects_a_delegate_holding_extra_tools():
+    """spawns.tool_pool already makes privilege escalation through agent *creation* a validation
+    error. Delegation was the open path: a delegated child runs as a full agent with its own
+    tools:, so without this flag a manager reaches issue_refund just by delegating."""
+    with pytest.raises(ValidationError) as excinfo:
+        _delegation_app(strict=True, parent_tools=[_LOOKUP], child_tools=[_LOOKUP, _REFUND])
+
+    message = str(excinfo.value)
+    assert "issue_refund" in message
+    assert "strict_delegation_privilege" in message
+
+
+def test_strict_delegation_privilege_allows_a_delegate_with_a_subset_of_the_callers_tools():
+    config = _delegation_app(
+        strict=True, parent_tools=[_LOOKUP, _REFUND], child_tools=[_LOOKUP]
+    )
+    assert config.agents["manager"].delegations == ["worker"]
+
+
+def test_delegation_privilege_is_not_enforced_by_default():
+    """Delegating to a deliberately more capable specialist is a legitimate, common shape — the
+    subset rule must stay opt-in so this doesn't break existing projects."""
+    config = _delegation_app(
+        strict=False, parent_tools=[_LOOKUP], child_tools=[_LOOKUP, _REFUND]
+    )
+    assert {t.name for t in config.agents["worker"].tools} == {"lookup_order", "issue_refund"}

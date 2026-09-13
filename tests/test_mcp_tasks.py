@@ -55,7 +55,7 @@ class _TextContent:
 
 class _FakeCallToolResult:
     def __init__(self, text: str, is_error: bool = False):
-        self.isError = is_error
+        self.is_error = is_error
         self.content = [_TextContent(text)]
 
 
@@ -143,9 +143,14 @@ def test_call_tool_leaves_a_plain_non_task_server_completely_unaffected():
 
 
 def test_call_tool_still_flattens_an_error_result_as_before():
+    """Uses the real mcp>=2.0 CallToolResult, not a fake: the flag is `is_error` there (v1 was
+    camelCase `isError`), and a fake mirroring the old name hid every real MCP call crashing."""
+
     async def run():
         manager = MCPToolManager()
-        session = _FakeSession(_FakeCallToolResult("boom", is_error=True))
+        session = _FakeSession(
+            types.CallToolResult(content=[types.TextContent(type="text", text="boom")], is_error=True)
+        )
         manager.sessions["srv"] = session
         manager.tool_mappings["srv_tool"] = "srv"
 

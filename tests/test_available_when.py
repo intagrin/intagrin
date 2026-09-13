@@ -123,6 +123,54 @@ def test_tool_reference_config_shape_also_respects_available_when(tmp_path):
     asyncio.run(_run())
 
 
+def _root_gated_graph(reference_condition=None):
+    """book_flight's gate declared on the ROOT tool, the agent holding only a name reference —
+    previously the root-level condition was silently ignored and the tool always offered."""
+    config = AppConfig(
+        version="1.0",
+        name="available-when-root-test",
+        default_agent="planner",
+        model=ModelConfig(primary="mock/model"),
+        memory=MemoryConfig(type="buffer"),
+        tools=[LocalToolConfig(name="book_flight", module="unused", available_when="research_done == True")],
+        agents={
+            "planner": AgentConfig(
+                tools=[
+                    LocalToolConfig(name="create_itinerary", module="unused"),
+                    ToolReferenceConfig(name="book_flight", available_when=reference_condition),
+                ]
+            )
+        },
+    )
+    return ExecutionGraph(config, {})
+
+
+def test_name_only_reference_inherits_the_root_tools_available_when(tmp_path):
+    async def _run():
+        engine = await _init_engine(tmp_path, _root_gated_graph())
+        agent_cfg = engine.graph.config.agents["planner"]
+
+        assert "book_flight" not in {t["function"]["name"] for t in await engine._get_active_tools(agent_cfg)}
+        assert not engine._is_tool_allowed_for_active_agent("book_flight")
+
+        engine.state["research_done"] = True
+        assert "book_flight" in {t["function"]["name"] for t in await engine._get_active_tools(agent_cfg)}
+
+    asyncio.run(_run())
+
+
+def test_reference_own_available_when_overrides_the_root_tools(tmp_path):
+    async def _run():
+        engine = await _init_engine(tmp_path, _root_gated_graph(reference_condition="approved == True"))
+        agent_cfg = engine.graph.config.agents["planner"]
+        engine.state["research_done"] = True  # satisfies the root gate, not the reference's own
+        engine.state["approved"] = False
+
+        assert "book_flight" not in {t["function"]["name"] for t in await engine._get_active_tools(agent_cfg)}
+
+    asyncio.run(_run())
+
+
 def test_execute_tool_still_rejects_a_gated_call_even_if_the_schema_check_is_bypassed(tmp_path):
     """Defense in depth: even a direct execute_tool call (bypassing whatever built the schema
     list the model saw) must be rejected while the condition is false — the schema filter is

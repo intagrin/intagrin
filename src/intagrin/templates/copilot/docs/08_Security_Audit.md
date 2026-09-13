@@ -1,3 +1,7 @@
+---
+description: A third-party-style InfoSec audit and threat model of the IntaGrin agentic framework, covering what's remediated and what needs deployment-time mitigation.
+---
+
 # InfoSec Audit & Threat Model Report
 **Target:** IntaGrin Agentic Framework  
 **Auditor:** Lead InfoSec Consultant  

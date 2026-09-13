@@ -1,3 +1,7 @@
+---
+description: A blueprint for an autonomous coding-agent loop in IntaGrin, using architect/coder/verifier handoffs to self-heal generated code.
+---
+
 # Example: Autonomous Coding Agent
 
 Here's a pattern for building a coding-agent loop with IntaGrin's handoffs: 

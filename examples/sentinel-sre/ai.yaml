@@ -1,0 +1,203 @@
+# yaml-language-server: $schema=../../src/intagrin/templates/ai.schema.json
+version: "1.0"
+name: "SentinelSRE"
+description: >
+  An autonomous SRE incident commander: triages production alerts, fans out one investigator per
+  affected service over a mock observability MCP server and a deploy-changelog OpenAPI, debates the
+  root cause, and remediates only through narrow, dry-run, multi-approver-gated actions — with
+  prompt-injection-laced logs structurally unable to reach a cluster-mutating tool.
+
+state_schema: "schemas.IncidentState"
+max_session_budget_usd: 3.00
+
+model:
+  primary: "gemini/gemini-3.5-flash-lite"
+  fallback: "gemini/gemini-3.5-flash"
+  # Cheap-to-expensive escalation for triage_agent only (the one agent with a response_schema —
+  # schema pass/fail is the confidence signal). A triage turn runs on flash-lite; a verdict that
+  # fails TriageVerdict validation is regenerated on flash before any corrector patch.
+  cascade:
+    - "gemini/gemini-3.5-flash-lite"
+    - "gemini/gemini-3.5-flash"
+  temperature: 0.2
+  guardrails:
+    system_safeguards: true
+
+memory:
+  type: "sqlite"
+  db_path: ".ai/memory.db"
+  shared_scope: "tenant"
+
+rag:
+  # Past postmortems — the Incident Commander checks these for a matching failure pattern first.
+  docs_dir: "kb"
+  top_k: 3
+  embedding_model: "gemini/gemini-embedding-001"
+
+episodic_memory:
+  # The postmortem agent records each incident's root cause + fix; the next incident recalls it.
+  scope: "tenant"
+  default_limit: 5
+  embedding_model: "gemini/gemini-embedding-001"
+
+condition_functions:
+  - name: "is_sev1"
+    module: "tools.conditions"
+
+reducers:
+  - key: "investigation_notes"
+    strategy: "append"
+
+circuit_breakers:
+  max_handoffs_per_session: 10
+  max_delegation_turns: 8
+  max_parallel_fan_out: 4
+  max_parallel_tool_calls_per_turn: 6
+  # search_logs returns ~50KB of raw log lines — keep only the head in context.
+  max_tool_result_chars: 6000
+  max_usd_cost_per_session: 3.00
+
+server:
+  auth:
+    type: "api_key"
+    env_var: "SENTINEL_API_KEY"
+    # Named approvers for N-of-M sign-off. rollback_deploy needs any 2 of these 3.
+    approvers:
+      oncall_sre: "SENTINEL_ONCALL_KEY"
+      service_owner: "SENTINEL_OWNER_KEY"
+      incident_commander: "SENTINEL_IC_KEY"
+  rate_limit:
+    max_requests_per_window: 30
+    window_seconds: 60
+    max_cost_per_caller_per_day: 20.00
+
+skills:
+  - name: "db_pool_exhaustion"
+    description: "Runbook for connection-pool exhaustion: how to tell a starved client pool from a saturated database, and which evidence confirms it."
+    path: "skills/db_pool_exhaustion.md"
+  - name: "safe_rollback"
+    description: "Runbook for rolling back a bad deploy safely: pick the target version, required approvals, verification after rollback."
+    path: "skills/safe_rollback.md"
+
+tools:
+  # Mock Prometheus/Loki/Kubernetes, spoken to over the Model Context Protocol. MCP output is
+  # untrusted by default — the first successful call flips _untrusted_content_ingested.
+  - name: "observability"
+    type: "mcp"
+    command: "python"
+    args: ["mcp_servers/observability.py"]
+  # Mock deploy changelog, wrapped straight from its OpenAPI spec (start it with scripts/demo.sh).
+  - name: "changelog"
+    type: "openapi"
+    url: "http://127.0.0.1:8787/openapi.json"
+  - name: "get_alert"
+    module: "tools.sre_tools"
+  - name: "post_status_update"
+    module: "tools.sre_tools"
+  # Broad (if read-only) cluster access is only offered while the session is uncontaminated: the
+  # moment any log line or external API response enters context, it's structurally withdrawn.
+  - name: "execute_kubectl"
+    module: "tools.sre_tools"
+    available_when: "not _untrusted_content_ingested"
+
+default_agent: "triage_agent"
+
+agents:
+  triage_agent:
+    description: "First responder. Classifies an alert's severity and blast radius; sev1 incidents are routed to the Incident Commander deterministically, with no LLM routing call."
+    system_prompt_file: "prompts/triage_agent.jinja2"
+    response_schema: "schemas.TriageVerdict"
+    # The router is the ONLY way out of triage — no handoffs, so the LLM can't escalate a sev3
+    # on a whim; escalation is a deterministic function of what triage recorded.
+    routers:
+      - condition: "is_sev1(severity, blast_radius)"
+        target: "incident_commander"
+    tools:
+      - name: "get_alert"
+
+  incident_commander:
+    description: "Runs the incident: checks past postmortems, fans out one investigator per affected service, loads the matching runbook, and records a root cause with a calibrated confidence."
+    system_prompt_file: "prompts/incident_commander.jinja2"
+    delegations:
+      - "service_investigator"
+    handoffs:
+      - "remediation_agent"
+      - "postmortem_agent"
+    skills: ["db_pool_exhaustion", "safe_rollback"]
+    tools:
+      - name: "post_status_update"
+      - name: "execute_kubectl"
+      - name: "changelog"
+      - name: "analyze_latency"
+        type: "sandbox"
+        language: "python"
+        timeout_seconds: 20
+        requires_approval: true
+
+  service_investigator:
+    description: "Single-service sub-agent, only reachable via the commander's delegate_to_many: metrics, pods, deploy history, and logs for exactly one service."
+    system_prompt_file: "prompts/service_investigator.jinja2"
+    tools:
+      - name: "observability"
+      - name: "changelog"
+      - name: "execute_kubectl"
+
+  remediation_agent:
+    description: "Applies the smallest reversible fix. Rollbacks need 2-of-3 human approvers and only appear once root-cause confidence is at least 0.8."
+    system_prompt_file: "prompts/remediation_agent.jinja2"
+    handoffs:
+      - "postmortem_agent"
+    skills: ["safe_rollback"]
+    tools:
+      - name: "post_status_update"
+      - name: "rollback_deploy"
+        module: "tools.sre_tools"
+        requires_approval: true
+        required_approvals: 2
+        available_when: "root_cause_confidence >= 0.8"
+      - name: "scale_service"
+        module: "tools.sre_tools"
+
+  postmortem_agent:
+    description: "Writes the blameless postmortem: spawns a timeline writer with a structured result schema and records the incident in episodic memory for next time."
+    system_prompt_file: "prompts/postmortem_agent.jinja2"
+    tools:
+      - name: "post_status_update"
+      - name: "get_incident_timeline"
+        module: "tools.sre_tools"
+    spawns:
+      tool_pool:
+        - "get_incident_timeline"
+      result_schema: "schemas.PostmortemTimeline"
+      requires_approval_on_first_action: false
+      max_creations_per_session: 2
+      on_complete:
+        - key: "postmortem_drafted"
+          value: true
+
+workflows:
+  # Offline multi-agent debate over ALRT-7731's root cause: `inta run root_cause_debate`.
+  root_cause_debate:
+    - name: "competing_hypotheses"
+      type: "vote"
+      vote:
+        strategy: "llm_judge"
+        debate_rounds: 2
+      tasks:
+        - name: "deploy_regression"
+          agent: "service_investigator"
+          instruction: >
+            Alert ALRT-7731 fired on checkout-api. Argue that a recent deploy caused it: gather
+            evidence with your tools, then state the root cause, the evidence, and a confidence.
+        - name: "database_capacity"
+          agent: "service_investigator"
+          instruction: >
+            Alert ALRT-7731 fired on checkout-api. Argue that orders-db ran out of capacity:
+            gather evidence with your tools, then state the root cause, the evidence, and a
+            confidence.
+        - name: "downstream_dependency"
+          agent: "service_investigator"
+          instruction: >
+            Alert ALRT-7731 fired on checkout-api. Argue that payments-api failing is the cause:
+            gather evidence with your tools, then state the root cause, the evidence, and a
+            confidence.

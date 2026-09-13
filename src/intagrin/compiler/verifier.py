@@ -195,6 +195,27 @@ class GraphVerifier:
                     f"required_approvers={approvers} (effective count: {len(approvers)})[/dim]"
                 )
 
+        # --- Two spellings of the same cost ceiling: circuit_breakers.max_usd_cost_per_session
+        # and the older root-level max_session_budget_usd. Both are enforced by the same runtime
+        # check (_check_budget_exceeded), which reads `cb.max_usd_cost_per_session or
+        # cfg.max_session_budget_usd` — so the circuit_breakers one silently wins and the root one
+        # becomes dead configuration whenever both are set to different values. Same shape, and
+        # same reasoning, as the required_approvals/required_approvers warning above: only flagged
+        # when they actually disagree, since a project that set both to the same number gets the
+        # number it asked for either way. ---
+        cb_budget = cfg.circuit_breakers.max_usd_cost_per_session
+        root_budget = cfg.max_session_budget_usd
+        if cb_budget is not None and root_budget is not None and cb_budget != root_budget:
+            console.print(
+                "\n[bold yellow]⚠ Two different session cost ceilings are configured — "
+                "circuit_breakers.max_usd_cost_per_session wins and max_session_budget_usd is "
+                "ignored:[/bold yellow]"
+            )
+            console.print(
+                f"   ↳ [dim]circuit_breakers.max_usd_cost_per_session=${cb_budget:.2f} "
+                f"(effective) vs max_session_budget_usd=${root_budget:.2f} (dead)[/dim]"
+            )
+
         # --- Lethal-trifecta guardrail: an agent with both an untrusted-output tool (RAG's
         # search_knowledge_base, or MCP/OpenAPI tools by default — see
         # LocalToolConfig.untrusted_output) and a separately-flagged sensitive tool
@@ -450,7 +471,49 @@ class GraphVerifier:
                 f"returns control, so depth is the relevant bound, not cycles)."
             )
 
+        # --- Delegation privilege: a delegated child runs as a full agent with its own tools:,
+        # so an edge whose target holds tools the caller doesn't is a real privilege escalation
+        # path — the thing spawns.tool_pool's subset rule exists to prevent on the other path.
+        # Reported either way: as a resolved guarantee when
+        # circuit_breakers.strict_delegation_privilege is on (parse would have failed otherwise),
+        # and as an advisory listing the specific escalating edges when it's off, since that's
+        # often intentional (triage delegating to a specialist) and must not fail the build. ---
+        escalating_edges = []
+        for parent_name, parent_cfg in cfg.agents.items():
+            if not getattr(parent_cfg, "delegations", None):
+                continue
+            parent_tools = {t.name for t in getattr(parent_cfg, "tools", []) or []}
+            for target_name in parent_cfg.delegations:
+                target_cfg = cfg.agents.get(target_name)
+                if target_cfg is None:
+                    continue
+                extra = sorted(
+                    {t.name for t in getattr(target_cfg, "tools", []) or []} - parent_tools
+                )
+                if extra:
+                    escalating_edges.append((parent_name, target_name, extra))
+        if cfg.circuit_breakers.strict_delegation_privilege:
+            console.print(
+                "\n[bold green]✓ Delegation privilege: every delegated sub-agent's tools are a "
+                "subset of its caller's (strict_delegation_privilege on).[/bold green]"
+            )
+        elif escalating_edges:
+            console.print(
+                "\n[bold yellow]⚠ Delegation grants tools the caller doesn't hold "
+                "(strict_delegation_privilege is off, so this is allowed):[/bold yellow]"
+            )
+            for parent_name, target_name, extra in escalating_edges:
+                console.print(
+                    f"   ↳ [dim]{parent_name} → {target_name} gains: {extra}[/dim]"
+                )
+
         # --- Cost ceiling ---
+        cb = cfg.circuit_breakers
+        # The one genuinely binding number: enforced at runtime by RuntimeEngine's
+        # _check_budget_exceeded against real accumulated litellm.completion_cost, so it holds
+        # regardless of anything the static token table below can't see (auto_route, spawned
+        # agents, however many self-healing retries actually happen).
+        hard_ceiling = cb.max_usd_cost_per_session or cfg.max_session_budget_usd
         cost_per_token = self._resolve_cost_per_token(cfg.model.primary)
         max_tokens_per_turn = cfg.model.max_tokens or 1500
         main_loop_tokens = max_tokens_per_turn * 10
@@ -469,7 +532,6 @@ class GraphVerifier:
                 f"{delegation_tokens:,}",
                 "[green]yes[/green]",
             )
-        cb = cfg.circuit_breakers
         corrector_tokens = 2 * cb.max_corrector_tokens
         table.add_row(
             "Self-healing corrector calls (per malformed tool/response, up to 2 retries)",
@@ -510,6 +572,29 @@ class GraphVerifier:
             "rounds scale with how many malformed calls/evictions/tool rounds actually happen in a "
             "turn, not with a fixed per-turn count. This is a floor, not a ceiling on total cost."
         )
+
+        # The floor above is a static estimate; this is the enforced stop. Reported separately and
+        # last so the two are never confused for each other.
+        if hard_ceiling is not None:
+            source = (
+                "circuit_breakers.max_usd_cost_per_session"
+                if cb.max_usd_cost_per_session
+                else "max_session_budget_usd"
+            )
+            console.print(
+                f"\n[bold white]Hard ceiling:[/bold white] [bold green]${hard_ceiling:.2f}[/bold green] "
+                f"per session, enforced at runtime ({source}). The session aborts once accumulated "
+                "spend reaches this, including cost incurred by delegated sub-agents — so unlike "
+                "the floor above it holds even for the paths this static analysis can't see "
+                "(auto_route, dynamically spawned agents, self-healing retries)."
+            )
+        else:
+            console.print(
+                "\n[bold yellow]⚠ No hard cost ceiling configured.[/bold yellow] [dim]The figure "
+                "above is a static floor, not a limit — nothing stops this project's total spend "
+                "at runtime. Set circuit_breakers.max_usd_cost_per_session to get an enforced "
+                "per-session stop that covers auto_route and spawned agents too.[/dim]"
+            )
 
         console.print(
             "\n[bold green]Verification complete.[/bold green] [dim]Acyclic (or safely-capped-cycle) "

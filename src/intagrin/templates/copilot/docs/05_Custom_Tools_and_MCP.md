@@ -1,3 +1,7 @@
+---
+description: Connect local Python tools and Model Context Protocol (MCP) servers to IntaGrin agents, with automatic argument parsing and self-healing retries.
+---
+
 # Tools & MCP Integration
 
 IntaGrin handles tool argument parsing, JSON decoding, and error trapping (with self-healing retries on malformed arguments) so your tool functions can stay plain Python.

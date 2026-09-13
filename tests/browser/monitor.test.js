@@ -1458,3 +1458,76 @@ agents:
     cleanupProject(demoDir);
   }
 });
+
+test('A router renders as a labelled, non-deletable edge alongside unchanged handoff/delegation edges', async () => {
+  // Regression test: the graph only drew handoffs and delegations, so an agent whose only exit
+  // is a deterministic router looked orphaned even though the router transfers control at
+  // runtime (and inta verify cycle-checks it). `triage` here has a router and nothing else.
+  const demoDir = scaffoldProject('router-demo');
+  const yamlPath = path.join(demoDir, 'ai.yaml');
+  fs.writeFileSync(
+    yamlPath,
+    `version: "1.0"
+name: "router-demo"
+default_agent: "triage"
+model:
+  primary: "mock/model"
+memory:
+  type: "sqlite"
+agents:
+  triage:
+    description: "Routes by rule only."
+    routers:
+      - condition: "priority == 'high'"
+        target: "commander"
+  commander:
+    description: "Runs the incident."
+    handoffs: ["worker"]
+    delegations: ["helper"]
+  worker:
+    description: "Does the work."
+  helper:
+    description: "Helps."
+`
+  );
+  const yamlBefore = fs.readFileSync(yamlPath, 'utf8');
+  const port = 8422;
+  let proc;
+  try {
+    proc = await startMonitor(demoDir, port);
+    const page = await browser.newPage();
+    const pageErrors = [];
+    page.on('pageerror', (e) => pageErrors.push(e.message));
+    try {
+      await page.goto(`http://localhost:${port}`, { waitUntil: 'domcontentloaded' });
+      const routerEdge = '[data-testid="rf__edge-e-router-triage-commander-0"]';
+      await page.waitForSelector(routerEdge, { timeout: 15000 });
+
+      const edges = await page.evaluate((sel) => {
+        const router = document.querySelector(sel);
+        return {
+          routerLabel: router ? router.textContent : null,
+          handoff: !!document.querySelector('[data-testid="rf__edge-e-commander-worker"]'),
+          delegation: !!document.querySelector('[data-testid="rf__edge-e-deleg-commander-helper"]'),
+        };
+      }, routerEdge);
+      assert.equal(edges.routerLabel, "priority == 'high'", 'router edge should be labelled with its condition');
+      assert.ok(edges.handoff, 'existing handoff edge should still render');
+      assert.ok(edges.delegation, 'existing delegation edge should still render');
+
+      // Selecting the router edge and pressing Backspace must neither remove it nor touch ai.yaml
+      // (onEdgesDelete would otherwise record it as a handoff removal).
+      await page.click(`${routerEdge} path.react-flow__edge-interaction`).catch(() => page.click(routerEdge));
+      await page.keyboard.press('Backspace');
+      await new Promise((r) => setTimeout(r, 800));
+      assert.ok(await page.$(routerEdge), 'router edge should survive a Backspace delete');
+      assert.equal(fs.readFileSync(yamlPath, 'utf8'), yamlBefore, 'ai.yaml must be unchanged');
+      assert.deepEqual(pageErrors, []);
+    } finally {
+      await page.close();
+    }
+  } finally {
+    if (proc) stopMonitor(proc);
+    cleanupProject(demoDir);
+  }
+});
